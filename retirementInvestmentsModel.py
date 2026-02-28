@@ -3,7 +3,7 @@
 Investment Allocation & Retirement Savings Simulator — Streamlit App
 =====================================================================
 
-Monte Carlo retirement planning tool with interactive visualisations.
+Monte Carlo retirement planning tool with interactive visualizations.
 
 Usage
 -----
@@ -13,7 +13,7 @@ Dependencies
 ------------
 numpy      (1.19+)  – vectorized computation and random number generation
 pandas     (1.2+)   – data manipulation and tabular display
-scipy      (1.6+)   – differential_evolution optimiser
+scipy      (1.6+)   – differential_evolution optimizer
 streamlit  (1.28+)  – web application framework
 plotly     (5.0+)   – interactive charts
 
@@ -22,17 +22,17 @@ What the tool does
 1. Collects basic financial inputs from an interactive sidebar form.
 2. Simulates the accumulation phase with AR(1) income and a linear glidepath.
 3. Simulates the withdrawal phase to capture sequence-of-returns risk.
-4. Optimises the starting portfolio allocation to maximise withdrawal survival.
+4. Optimizes the starting portfolio allocation to maximize withdrawal survival.
 5. Renders interactive charts covering trajectories, allocation, survival,
    scenarios, and return-assumption sensitivity.
 
 Known model limitations
 -----------------------
-- The glidepath is linear and deterministic (not dynamically optimised).
+- The glidepath is linear and deterministic (not dynamically optimized).
 - Income autocorrelation is fixed at 0.3 (Guvenen 2009 literature average).
 - Social Security projections assume 2% annual COLA; actual adjustments vary.
 - Past return and volatility data (1926-2023) may not repeat in the future.
-- Tax treatment is not modelled; all figures are pre-tax.
+- Tax treatment is not modeled; all figures are pre-tax.
 
 Author:       Mark Smith
 Version:      4.0.0
@@ -259,7 +259,7 @@ def estimate_ss_benefit(
     3. Adjust for early or delayed claiming relative to Full Retirement Age.
 
     This is a ballpark figure only. Actual benefits depend on the user's
-    complete earnings history. ssa.gov/myaccount provides a personalised estimate.
+    complete earnings history. ssa.gov/myaccount provides a personalized estimate.
     """
     if current_income <= 0:
         return 0.0
@@ -470,7 +470,7 @@ def run_withdrawal_simulation(
 
 def optimize_portfolio(cfg: SimConfig) -> np.ndarray:
     """
-    Differential Evolution optimiser that maximises withdrawal-survival success
+    Differential Evolution optimizer that maximizes withdrawal-survival success
     rate (uses the faster proxy objective during search).
 
     Objective: −success_rate − median_savings / 1e9
@@ -973,8 +973,8 @@ def _sidebar_inputs():
             "Current retirement savings ($)",
             min_value=0, max_value=50_000_000, value=50_000, step=5_000,
             help=(
-                "Total value of all retirement accounts today "
-                "(401(k), Individual Retirement Account (IRA), Roth IRA, taxable brokerage account, etc.)."
+                "Total value of all retirement accounts today, "
+                "including 401(k)s, IRAs, Roth IRAs, and taxable brokerage accounts."
             ),
         )
         savings_rate_pct = st.slider(
@@ -990,8 +990,8 @@ def _sidebar_inputs():
             "Additional fixed annual savings ($)",
             min_value=0, max_value=500_000, value=0, step=1_000,
             help=(
-                "Fixed-dollar contributions outside your income each year "
-                "(e.g. inheritance, rental income, side income)."
+                "Fixed-dollar contributions outside your regular income each year, "
+                "such as inheritances, rental income, or side income."
             ),
         )
 
@@ -1001,7 +1001,7 @@ def _sidebar_inputs():
             value=True,
             help=(
                 "Social Security offsets the nest egg required from your portfolio. "
-                "Check ssa.gov/myaccount for your personalised estimate."
+                "Check ssa.gov/myaccount for your personalized estimate."
             ),
         )
         ss_benefit = 0.0
@@ -1019,8 +1019,8 @@ def _sidebar_inputs():
                 help=(
                     "Your estimated annual Social Security income at retirement, "
                     "expressed in today's purchasing power. The model projects it "
-                    "forward at 2% annual cost-of-living adjustment (COLA). "
-                    "The value is pre-filled with a rough estimate based on your "
+                    "forward using a 2% annual cost-of-living adjustment. "
+                    "The pre-filled value is a rough estimate based on your "
                     "income and retirement age; edit it if you have a more accurate figure."
                 ),
             ))
@@ -1052,13 +1052,13 @@ def _welcome_screen():
     """Landing screen shown before any simulation is run."""
     st.info(
         "Configure your financial profile in the **sidebar** and click "
-        "**Run Analysis** to generate your personalised retirement outlook."
+        "**Run Analysis** to generate your personalized retirement outlook."
     )
 
     col1, col2, col3, col4 = st.columns(4)
     steps = [
         ("1. Input", "Enter age, income, savings, and goals in the sidebar."),
-        ("2. Optimise", "An optimization algorithm tests thousands of possible investment mixes "
+        ("2. Optimize", "An optimization algorithm tests thousands of possible investment mixes "
                         "to find the allocation most likely to carry you through retirement."),
         ("3. Simulate", f"{SIMULATION_COUNT:,} Monte Carlo paths model both your "
                         "accumulation and retirement drawdown phases."),
@@ -1094,7 +1094,7 @@ def _run_analysis(inputs: dict):
     """Run all computations and store results in st.session_state."""
     cfg = build_config(**{k: v for k, v in inputs.items() if k != "run"})
 
-    progress = st.progress(0, text="Optimising portfolio allocation…")
+    progress = st.progress(0, text="Optimizing portfolio allocation…")
     optimal_weights = optimize_portfolio(cfg)
     progress.progress(33, text=f"Running {SIMULATION_COUNT:,}-path accumulation simulation…")
 
@@ -1230,11 +1230,11 @@ def _display_results(r: dict):
     # ── Portfolio & glidepath ─────────────────────────────────────────────────
     st.subheader("Optimal Portfolio Allocation & Glidepath")
     st.caption(
-        "**Left:** Optimised starting allocation, maximising withdrawal survival within hard constraints "
-        "(alternative investments ≤ 10%; bonds + cash ≥ minimum safety floor). "
+        "**Left:** Optimized starting allocation, maximizing withdrawal survival within hard constraints: "
+        "alternative investments are capped at 10% and bonds plus cash must meet a minimum safety floor. "
         "**Right:** How the portfolio automatically shifts toward safer investments over time, "
-        "blending from the growth allocation today toward a conservative income profile at retirement, "
-        "similar to a target-date fund (an investment product that automatically becomes more conservative as your retirement date approaches)."
+        "blending from the growth allocation today toward a conservative income profile at retirement — "
+        "similar to a target-date fund, which automatically becomes more conservative as your retirement date approaches."
     )
     col_d, col_g = st.columns(2)
     with col_d:
@@ -1263,7 +1263,7 @@ def _display_results(r: dict):
         mc1, mc2, mc3 = st.columns(3)
         mc1.metric(
             "Bond + Cash Total", f"{bond_total:.1%}",
-            help=f"Minimum required: {cfg.min_bond:.0%} (glidepath floor for {cfg.years_to_simulate}-yr horizon).",
+            help=f"Minimum required: {cfg.min_bond:.0%}, based on the glidepath floor for a {cfg.years_to_simulate}-year horizon.",
         )
         mc2.metric(
             "Alternatives (Real Estate Investment Trusts + Commodities)", f"{alt_total:.1%}",
@@ -1276,8 +1276,9 @@ def _display_results(r: dict):
     st.caption(
         "Each year of retirement some simulation paths exhaust their portfolio. "
         "This chart shows what fraction survive through each year. "
+        "Withdrawals grow at 2% per year to keep pace with inflation. "
         "A steep early decline signals high **sequence-of-returns risk**: "
-        "a severe downturn in the first few retirement years permanently impairs "
+        "a severe market downturn in the first few retirement years can permanently impair "
         "a portfolio even if the nest egg appeared adequate at the retirement date."
     )
     st.plotly_chart(fig_withdrawal_survival(r["survival_curve"], cfg), use_container_width=True)
@@ -1321,21 +1322,21 @@ def _display_results(r: dict):
     if rate < DEFAULT_TARGET_RATE:
         st.warning(
             "Your current plan falls below the 75% success target. "
-            "Consider the following actions (see scenarios above for quantified estimates):"
+            "The scenarios above show quantified estimates for each action below:"
         )
         st.markdown("""
-* **Increase your savings rate.** Even +1 percentage point has a measurable effect; +5 to 10 percentage points is transformative.
-* **Delay retirement.** Each additional year adds contributions and compounds existing savings.
-* **Review your spending target.** A lower income replacement rate reduces the required nest egg.
-* **Verify your Social Security entitlement.** Log in at [ssa.gov/myaccount](https://www.ssa.gov/myaccount/) to see your personalised benefit estimate; it may be higher than assumed here.
-* **Consult a fee-only financial planner.** A member of NAPFA (National Association of Personal Financial Advisors) can account for tax treatment, real estate equity, and other assets not modelled here.
+* Increase your savings rate. Even +1 percentage point has a measurable effect; +5 to 10 percentage points is transformative.
+* Delay retirement. Each additional year adds contributions and compounds existing savings.
+* Review your spending target. A lower income replacement rate reduces the required nest egg.
+* Verify your Social Security entitlement. Log in at [ssa.gov/myaccount](https://www.ssa.gov/myaccount/) to see your personalized benefit estimate; it may be higher than assumed here.
+* Consult a fee-only financial planner. A NAPFA planner can account for tax treatment, real estate equity, and other assets not modeled here. See napfa.org to find one.
         """)
     else:
         st.success("You are on track. To build a wider margin of safety:")
         st.markdown("""
 * Re-run this analysis annually as your income, savings, and goals evolve.
 * Consider modest savings-rate increases to widen your buffer against lower-return scenarios.
-* Review your asset allocation annually. The glidepath is modelled as a smooth blend, but in practice periodic rebalancing is required.
+* Review your asset allocation annually. The glidepath is modeled as a smooth blend, but in practice periodic rebalancing is required.
         """)
 
     # ── Model caveats ─────────────────────────────────────────────────────────
@@ -1343,19 +1344,21 @@ def _display_results(r: dict):
         col_a, col_b = st.columns(2)
         with col_a:
             st.markdown("""
-**Modelling choices**
-* Glidepath is **linear and deterministic**, not dynamically optimised. A full multi-period optimisation would better capture life-cycle shifts.
-* Income autocorrelation is fixed at **0.30** (Guvenen 2009 literature average). Your career may be more or less persistent.
-* **Social Security cost-of-living adjustment (COLA)** assumed at 2%/yr; actual adjustments vary.
-* **Tax treatment is not modelled.** All figures are pre-tax.
+**Modeling choices**
+* The glidepath is **linear and deterministic**, not dynamically optimized. A full multi-period optimization would better capture life-cycle shifts.
+* Income autocorrelation is fixed at **0.30**, following the Guvenen 2009 literature average. Your career may be more or less persistent.
+* The Social Security cost-of-living adjustment is assumed at 2% per year; actual adjustments vary.
+* Tax treatment is not modeled. All figures are pre-tax.
+* The withdrawal model assumes a fixed inflation-adjusted draw each year. It does not model flexible spending strategies such as dynamic withdrawals or guardrail methods.
             """)
         with col_b:
             st.markdown("""
 **Data & assumptions**
-* Return data: **1926 to 2023** (S&P 500, Bloomberg, NAREIT (National Association of Real Estate Investment Trusts index), S&P GSCI (Goldman Sachs Commodity Index), Treasury Bills (T-Bills)). Past returns do not guarantee future results.
-* Correlations are long-run estimates; they fluctuate, especially during crises.
-* Life expectancy follows simplified **Social Security Administration (SSA) actuarial tables**; individual health circumstances vary widely.
-* Consult a **fee-only financial planner** (napfa.org) for personalised advice.
+* Return data covers **1926 to 2023** across six asset classes: S&P 500, Bloomberg US Corporate IG, NAREIT All REITs, S&P GSCI, 10-year Treasuries, and T-Bills. Past returns do not guarantee future results.
+* Returns are modeled as correlated log-normal draws using a Cholesky decomposition of the asset covariance matrix. Correlations are long-run estimates; they fluctuate, especially during crises.
+* Life expectancy follows simplified SSA actuarial tables; individual health circumstances vary widely.
+* The optimizer uses Differential Evolution, a global search algorithm, running 500 simulations per candidate allocation. Final results use 5,000 simulation paths.
+* Consult a **fee-only financial planner** at napfa.org for personalized advice.
             """)
 
 
@@ -1367,9 +1370,11 @@ def _display_results(r: dict):
 def main():
     st.title("Retirement Investment Simulator")
     st.markdown(
-        "A Monte Carlo tool that simulates **thousands of possible market futures** "
-        "to identify the portfolio allocation most likely to support you "
-        "through a full retirement. All inputs are in the sidebar."
+        "This is both a simulation and an optimization model. "
+        "It optimizes your portfolio allocation across six asset classes "
+        "and then projects, across thousands of simulated market futures, "
+        "whether your savings are likely to last through retirement. "
+        "All inputs are in the sidebar."
     )
 
     inputs = _sidebar_inputs()
