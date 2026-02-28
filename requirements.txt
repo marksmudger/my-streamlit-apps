@@ -1,0 +1,7 @@
+dataclasses
+math
+numpy
+pandas
+plotly.graph_objects
+scipy.optimize
+streamlit
