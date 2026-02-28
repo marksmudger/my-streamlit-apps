@@ -1,7 +1,5 @@
-dataclasses
-math
 numpy
 pandas
-plotly.graph_objects
-scipy.optimize
+plotly
+scipy
 streamlit
