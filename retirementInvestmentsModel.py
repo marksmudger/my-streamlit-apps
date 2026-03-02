@@ -794,11 +794,21 @@ def fig_sensitivity(base_rate: float, minus1: float, minus2: float) -> go.Figure
         template=_TEMPLATE, font=_FONT,
         xaxis=dict(title=""),
         yaxis=dict(title="Withdrawal Survival Rate (%)",
-                   range=[0, 110], ticksuffix="%"),
+                   range=[0, 115], ticksuffix="%"),
         height=380,
         margin=dict(t=40, b=40),
     )
     return fig
+
+
+_RISK_RETURN_TEXT_POSITIONS = {
+    "Stocks":             "top center",
+    "Corporate Bonds":    "top right",
+    "Government Bonds":   "bottom left",
+    "Real Estate (REIT)": "top center",
+    "Commodities":        "top left",
+    "Cash":               "bottom right",
+}
 
 
 def fig_risk_return() -> go.Figure:
@@ -822,7 +832,7 @@ def fig_risk_return() -> go.Figure:
             marker=dict(size=size, color=ASSET_COLORS[name],
                         line=dict(width=2, color="white"), opacity=0.9),
             text=[name],
-            textposition="top center",
+            textposition=_RISK_RETURN_TEXT_POSITIONS[name],
             name=name,
             hovertemplate=(
                 f"<b>{name}</b><br>"
@@ -893,12 +903,22 @@ def fig_withdrawal_distribution(annual_withdrawal_results: np.ndarray) -> go.Fig
     p50 = float(np.percentile(vals, 50))
     p75 = float(np.percentile(vals, 75))
 
-    for pct, label, color in [(p25, "25th Percentile", "#F57C00"),
-                               (p50, "Median", "#1565C0"),
-                               (p75, "75th Percentile", "#C62828")]:
-        fig.add_vline(x=pct, line_dash="dash", line_color=color,
-                      annotation_text=f"{label}: ${pct:.0f}K",
-                      annotation_position="top")
+    for (pct, label, color), y_pos in zip(
+        [
+            (p25, "25th Percentile", "#F57C00"),
+            (p50, "Median",          "#1565C0"),
+            (p75, "75th Percentile", "#C62828"),
+        ],
+        [0.95, 0.78, 0.61],
+    ):
+        fig.add_vline(
+            x=pct, line_dash="dash", line_color=color,
+            annotation_text=f"{label}: ${pct:.0f}K",
+            annotation_yref="paper",
+            annotation_y=y_pos,
+            annotation_yanchor="bottom",
+            annotation_xanchor="left",
+        )
 
     fig.update_layout(
         template=_TEMPLATE, font=_FONT,
@@ -1009,9 +1029,14 @@ def _sidebar_inputs():
             estimated_ss = estimate_ss_benefit(
                 current_income, int(current_age), int(retirement_age)
             )
-            # Pre-fill with estimate on first load; preserve any value the user has typed
-            if "ss_benefit_input" not in st.session_state:
+            # Pre-fill with the current estimate; reset if the estimate changes
+            # (e.g. because the user updated their income or retirement age).
+            if (
+                "ss_benefit_input" not in st.session_state
+                or st.session_state.get("ss_benefit_estimate") != int(estimated_ss)
+            ):
                 st.session_state["ss_benefit_input"] = int(estimated_ss)
+            st.session_state["ss_benefit_estimate"] = int(estimated_ss)
             ss_benefit = float(st.number_input(
                 "Expected annual Social Security benefit (today's $)",
                 min_value=0, max_value=60_000, step=500,
