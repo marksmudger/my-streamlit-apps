@@ -132,10 +132,15 @@ def _request_with_retry(url, params=None):
     return None
 
 
-def fetch_scores(date: str) -> list[dict]:
+def fetch_scores_range(start_date: str, end_date: str) -> list[dict]:
+    """Fetch all completed MLB games in a date range (up to ~1 month per call)."""
     params = {
-        "sportId": 1, "date": date,
-        "hydrate": "team,linescore", "language": "en",
+        "sportId": 1,
+        "startDate": start_date,
+        "endDate": end_date,
+        "hydrate": "team,linescore",
+        "gameType": "R,F,D,L,W,C,P",  # Regular, postseason, etc.
+        "language": "en",
     }
     response = _request_with_retry(SCHEDULE_ENDPOINT, params=params)
     if response is None:
@@ -144,14 +149,15 @@ def fetch_scores(date: str) -> list[dict]:
     data = response.json()
     games = []
     for date_entry in data.get("dates", []):
+        game_date = date_entry.get("date", "")
         for game in date_entry.get("games", []):
-            parsed = _parse_game(game, date)
+            parsed = _parse_game(game, game_date)
             if parsed:
                 games.append(parsed)
     return games
 
 
-def _parse_game(game: dict, query_date: str) -> Optional[dict]:
+def _parse_game(game: dict, game_date: str) -> Optional[dict]:
     status_code = game.get("status", {}).get("statusCode", "")
     if status_code not in ("F", "FR", "FT"):
         return None
@@ -162,9 +168,12 @@ def _parse_game(game: dict, query_date: str) -> Optional[dict]:
     if away_score is None or home_score is None:
         return None
 
+    # Use the officialDate from the game if available, fallback to date_entry date
+    official_date = game.get("officialDate", game_date)
+
     return {
         "game_id": game.get("gamePk"),
-        "date": query_date,
+        "date": official_date,
         "away_team": teams["away"]["team"]["name"],
         "away_score": int(away_score),
         "home_team": teams["home"]["team"]["name"],
@@ -173,23 +182,32 @@ def _parse_game(game: dict, query_date: str) -> Optional[dict]:
 
 
 def fetch_season_scores(start_date: str, end_date: str, progress_bar=None):
+    """Fetch all games in chunks of 30 days (MLB API supports date ranges)."""
     all_games = []
     current = datetime.strptime(start_date, "%Y-%m-%d")
     end = datetime.strptime(end_date, "%Y-%m-%d")
     total_days = (end - current).days + 1
+    chunk_size = 30  # days per API call
 
-    day_num = 0
+    elapsed = 0
     while current <= end:
-        day_num += 1
-        date_str = current.strftime("%Y-%m-%d")
-        games = fetch_scores(date_str)
-        all_games.extend(games)
-        current += timedelta(days=1)
+        chunk_end = min(current + timedelta(days=chunk_size - 1), end)
+        chunk_start_str = current.strftime("%Y-%m-%d")
+        chunk_end_str = chunk_end.strftime("%Y-%m-%d")
 
         if progress_bar:
-            progress_bar.progress(day_num / total_days, text=f"Fetching {date_str}...")
+            pct = min(elapsed / total_days, 1.0)
+            progress_bar.progress(pct, text=f"Fetching {chunk_start_str} to {chunk_end_str}...")
 
-        time.sleep(0.2)
+        games = fetch_scores_range(chunk_start_str, chunk_end_str)
+        all_games.extend(games)
+
+        elapsed += (chunk_end - current).days + 1
+        current = chunk_end + timedelta(days=1)
+        time.sleep(0.3)
+
+    if progress_bar:
+        progress_bar.progress(1.0, text="Done!")
 
     return all_games
 
@@ -449,10 +467,10 @@ def main():
     completed_teams = sum(1 for t in board if t.completed)
 
     col1, col2, col3, col4 = st.columns(4)
-    col1.metric("Games Fetched", f"{total_games:,}")
-    col2.metric("Leader", f"{SHORT_NAMES.get(leader.team_name, leader.team_name)}")
-    col3.metric("Best Progress", f"{most_scratched}/14")
-    col4.metric("Teams Finished", f"{completed_teams}/30")
+    col1.metric("Completed Games", f"{total_games:,}", help="Total final-score MLB games recorded this season")
+    col2.metric("Pool Leader", f"{SHORT_NAMES.get(leader.team_name, leader.team_name)}", help="Team with the most run totals scratched off")
+    col3.metric("Most Scratched Off", f"{most_scratched}/14", help="How many of the 14 run totals (0–13) the leading team has achieved")
+    col4.metric("Teams Finished", f"{completed_teams}/30", help="Teams that have scratched off all 14 run totals")
 
     # Winner banner
     winners = [t for t in board if t.completed]
@@ -487,9 +505,9 @@ def main():
                 "Abbr": SHORT_NAMES.get(team.team_name, ""),
                 "Owner": team.participant,
                 "Scratched": team.scratched_count,
-                "GP": team.games_played,
-                "Remaining": ", ".join(str(r) for r in remaining) if remaining else "COMPLETE",
-                "# Left": len(remaining),
+                "Games Played": team.games_played,
+                "Run Totals Still Needed": ", ".join(str(r) for r in remaining) if remaining else "COMPLETE",
+                "Still Need": len(remaining),
             })
 
         df = pd.DataFrame(rows)
@@ -566,8 +584,8 @@ def main():
 
         col_gp, col_done, col_left = st.columns(3)
         col_gp.metric("Games Played", team.games_played)
-        col_done.metric("Scratched Off", f"{team.scratched_count}/14")
-        col_left.metric("Remaining", len(team.remaining))
+        col_done.metric("Run Totals Scratched Off", f"{team.scratched_count}/14", help="Out of 14 possible (0 through 13)")
+        col_left.metric("Run Totals Still Needed", len(team.remaining), help="How many of the 14 run totals this team hasn't scored yet")
 
         # Visual scratch card
         cols = st.columns(14)
@@ -622,11 +640,12 @@ def main():
 
             games_left = 162 - team.games_played
             pcol1, pcol2, pcol3 = st.columns(3)
-            pcol1.metric("Expected Games to Finish", f"~{sim['expected_games']:.0f}")
-            pcol2.metric("Median", f"{sim['median_games']:.0f}")
+            pcol1.metric("Est. Games to Complete", f"~{sim['expected_games']:.0f}", help="Average number of games needed to scratch off all remaining run totals, based on simulation")
+            pcol2.metric("Median Games to Complete", f"{sim['median_games']:.0f}", help="Half of simulated seasons finished faster than this, half slower")
             pcol3.metric(
-                f"Finish This Season ({games_left} GP left)",
-                f"{sim['completion_prob_season']*100:.1f}%"
+                f"Chance of Finishing ({games_left} games left)",
+                f"{sim['completion_prob_season']*100:.1f}%",
+                help="Probability this team scratches off all remaining run totals before their 162-game season ends"
             )
 
             hardest = max(team.remaining, key=lambda r: 1.0 / freq.get(r, 0.001))
@@ -648,11 +667,11 @@ def main():
             blend = freq.get(r, 0.0)
             one_in = 1 / blend if blend > 0 else float("inf")
             prob_rows.append({
-                "Runs": r,
-                "Historical": f"{hist:.1%}",
+                "Runs Scored": r,
+                "Historical Avg (2014–24)": f"{hist:.1%}",
                 "This Season": f"{obs:.1%}" if avg_gp > 0 else "—",
-                "Blended": f"{blend:.1%}",
-                "~1 in N games": f"{one_in:.1f}",
+                "Blended Estimate": f"{blend:.1%}",
+                "Avg. Games Between Occurrences": f"{one_in:.1f}",
             })
 
         prob_df = pd.DataFrame(prob_rows)
@@ -704,9 +723,9 @@ def main():
                         "Abbr": SHORT_NAMES.get(team.team_name, ""),
                         "Owner": team.participant,
                         "Scratched": team.scratched_count,
-                        "GP": team.games_played,
-                        "Exp. Games Left": 0,
-                        "Season Finish %": 100.0,
+                        "Games Played": team.games_played,
+                        "Est. Games to Complete": 0,
+                        "Chance of Finishing by Season End": 100.0,
                         "Status": f"DONE ({team.completion_date()})",
                     })
                 elif team.games_played > 0:
@@ -720,23 +739,30 @@ def main():
                         "Abbr": SHORT_NAMES.get(team.team_name, ""),
                         "Owner": team.participant,
                         "Scratched": team.scratched_count,
-                        "GP": team.games_played,
-                        "Exp. Games Left": round(sim["expected_games"]),
-                        "Season Finish %": round(sim["completion_prob_season"] * 100, 1),
+                        "Games Played": team.games_played,
+                        "Est. Games to Complete": round(sim["expected_games"]),
+                        "Chance of Finishing by Season End": round(sim["completion_prob_season"] * 100, 1),
                         "Status": f"Need {len(team.remaining)} more",
                     })
 
         race_df = pd.DataFrame(race_rows)
         if not race_df.empty:
-            race_df = race_df.sort_values("Exp. Games Left")
+            race_df = race_df.sort_values("Est. Games to Complete")
+
+            st.caption(
+                "**Est. Games to Complete**: average number of games needed to scratch off all "
+                "remaining run totals (based on simulation). "
+                "**Chance of Finishing by Season End**: probability of completing the pool "
+                "before the team's 162-game season is over."
+            )
 
             st.dataframe(
                 race_df,
                 use_container_width=True,
                 hide_index=True,
                 column_config={
-                    "Season Finish %": st.column_config.ProgressColumn(
-                        "Season Finish %", min_value=0, max_value=100, format="%.1f%%"
+                    "Chance of Finishing by Season End": st.column_config.ProgressColumn(
+                        "Chance of Finishing by Season End", min_value=0, max_value=100, format="%.1f%%"
                     ),
                     "Scratched": st.column_config.ProgressColumn(
                         "Progress", min_value=0, max_value=14, format="%d/14"
@@ -746,15 +772,16 @@ def main():
 
             # Chart: expected games remaining
             fig_race = px.bar(
-                race_df.sort_values("Exp. Games Left"),
-                x="Abbr", y="Exp. Games Left",
-                color="Season Finish %",
+                race_df.sort_values("Est. Games to Complete"),
+                x="Abbr", y="Est. Games to Complete",
+                color="Chance of Finishing by Season End",
                 color_continuous_scale="RdYlGn",
-                title="Expected Games Remaining to Complete Pool",
+                title="Estimated Games Remaining to Complete Pool",
                 range_color=[0, 100],
             )
             fig_race.update_layout(
                 xaxis_title="Team",
+                yaxis_title="Est. Games to Complete",
                 height=400,
                 margin=dict(t=40),
             )
