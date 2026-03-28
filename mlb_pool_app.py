@@ -216,17 +216,42 @@ def fetch_season_scores(start_date: str, end_date: str, progress_bar=None):
 # Pool Logic
 # ---------------------------------------------------------------------------
 
+def discover_team_names(games: list[dict]) -> set[str]:
+    """Extract all unique team names that appear in the fetched game data."""
+    names = set()
+    for game in games:
+        names.add(game["away_team"])
+        names.add(game["home_team"])
+    return names
+
+
 def build_team_progress(games, participants=None):
     participants = participants or {}
     teams = {}
-    for name in ALL_TEAMS:
+
+    # Dynamically build team list from whatever the API actually returns,
+    # so we never silently drop a team due to a name mismatch.
+    api_names = discover_team_names(games)
+
+    # Start with API-discovered names (these are ground truth)
+    for name in api_names:
+        abbr = SHORT_NAMES.get(name, "")
         teams[name] = TeamProgress(name, participants.get(name, "—"))
+        # If no abbreviation exists yet, create one from the team name
+        if not abbr and name not in SHORT_NAMES:
+            SHORT_NAMES[name] = "".join(
+                word[0] for word in name.split() if word[0].isupper()
+            )[:3].upper()
+
+    # Also include any hardcoded teams that didn't appear in games yet
+    # (e.g., if fetching a partial date range where a team had an off day)
+    for name in ALL_TEAMS:
+        if name not in teams:
+            teams[name] = TeamProgress(name, participants.get(name, "—"))
 
     for game in sorted(games, key=lambda g: g["date"]):
-        if game["away_team"] in teams:
-            teams[game["away_team"]].record_game(game["away_score"], game["date"])
-        if game["home_team"] in teams:
-            teams[game["home_team"]].record_game(game["home_score"], game["date"])
+        teams[game["away_team"]].record_game(game["away_score"], game["date"])
+        teams[game["home_team"]].record_game(game["home_score"], game["date"])
 
     return teams
 
@@ -400,8 +425,10 @@ def main():
                 st.error(f"Invalid JSON: {e}")
 
         # Manual entry via expander
+        # Include both hardcoded teams and any previously discovered API names
+        all_known_teams = sorted(set(ALL_TEAMS) | set(SHORT_NAMES.keys()))
         with st.expander("Edit assignments manually"):
-            for team in ALL_TEAMS:
+            for team in all_known_teams:
                 val = st.text_input(
                     SHORT_NAMES.get(team, team),
                     value=st.session_state.participants.get(team, ""),
@@ -459,6 +486,20 @@ def main():
     freq = blended_frequencies(observed, int(avg_gp))
 
     end_str = st.session_state.get("end_date", "—")
+
+    # Diagnostic: surface any team names from the API that aren't in our hardcoded list
+    api_names = discover_team_names(games)
+    unknown_names = api_names - set(ALL_TEAMS)
+    if unknown_names:
+        with st.sidebar:
+            st.divider()
+            st.subheader("Team Name Alerts")
+            st.warning(
+                f"The MLB API returned team name(s) not in the built-in list: "
+                f"**{', '.join(sorted(unknown_names))}**. "
+                f"These teams are tracked automatically, but you may want to update "
+                f"the ALL_TEAMS list and SHORT_NAMES dict in the source code."
+            )
 
     # --- Top metrics ---
     leader = board[0]
