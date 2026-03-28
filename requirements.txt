@@ -1,5 +1,6 @@
 numpy
 pandas
 plotly
+requests
 scipy
 streamlit==1.42.0

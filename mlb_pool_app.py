@@ -1,0 +1,773 @@
+"""
+MLB 13-Run Pool Tracker — Streamlit Dashboard
+===============================================
+Interactive web dashboard for tracking the 13-run pool.
+
+Run with:
+    pip install streamlit requests plotly pandas
+    streamlit run mlb_pool_app.py
+"""
+
+import json
+import time
+import random
+import pandas as pd
+import plotly.graph_objects as go
+import plotly.express as px
+import streamlit as st
+from datetime import datetime, timedelta
+from typing import Optional
+from collections import defaultdict
+
+import requests
+
+# ---------------------------------------------------------------------------
+# Configuration
+# ---------------------------------------------------------------------------
+
+BASE_URL = "https://statsapi.mlb.com/api/v1"
+SCHEDULE_ENDPOINT = f"{BASE_URL}/schedule"
+REQUEST_TIMEOUT = 15
+RETRY_ATTEMPTS = 3
+RETRY_DELAY = 2
+
+OPENING_DAY = "2026-03-26"
+TARGET_RUNS = list(range(0, 14))
+MC_SIMULATIONS = 10_000
+
+ALL_TEAMS = [
+    "Arizona Diamondbacks", "Atlanta Braves", "Baltimore Orioles",
+    "Boston Red Sox", "Chicago Cubs", "Chicago White Sox",
+    "Cincinnati Reds", "Cleveland Guardians", "Colorado Rockies",
+    "Detroit Tigers", "Houston Astros", "Kansas City Royals",
+    "Los Angeles Angels", "Los Angeles Dodgers", "Miami Marlins",
+    "Milwaukee Brewers", "Minnesota Twins", "New York Mets",
+    "New York Yankees", "Oakland Athletics", "Philadelphia Phillies",
+    "Pittsburgh Pirates", "San Diego Padres", "San Francisco Giants",
+    "Seattle Mariners", "St. Louis Cardinals", "Tampa Bay Rays",
+    "Texas Rangers", "Toronto Blue Jays", "Washington Nationals",
+]
+
+# Short display names for compact tables
+SHORT_NAMES = {
+    "Arizona Diamondbacks": "ARI", "Atlanta Braves": "ATL",
+    "Baltimore Orioles": "BAL", "Boston Red Sox": "BOS",
+    "Chicago Cubs": "CHC", "Chicago White Sox": "CHW",
+    "Cincinnati Reds": "CIN", "Cleveland Guardians": "CLE",
+    "Colorado Rockies": "COL", "Detroit Tigers": "DET",
+    "Houston Astros": "HOU", "Kansas City Royals": "KC",
+    "Los Angeles Angels": "LAA", "Los Angeles Dodgers": "LAD",
+    "Miami Marlins": "MIA", "Milwaukee Brewers": "MIL",
+    "Minnesota Twins": "MIN", "New York Mets": "NYM",
+    "New York Yankees": "NYY", "Oakland Athletics": "OAK",
+    "Philadelphia Phillies": "PHI", "Pittsburgh Pirates": "PIT",
+    "San Diego Padres": "SD", "San Francisco Giants": "SF",
+    "Seattle Mariners": "SEA", "St. Louis Cardinals": "STL",
+    "Tampa Bay Rays": "TB", "Texas Rangers": "TEX",
+    "Toronto Blue Jays": "TOR", "Washington Nationals": "WSH",
+}
+
+HISTORICAL_RUN_FREQ = {
+    0: 0.070, 1: 0.098, 2: 0.123, 3: 0.138, 4: 0.136,
+    5: 0.118, 6: 0.095, 7: 0.072, 8: 0.051, 9: 0.036,
+    10: 0.024, 11: 0.015, 12: 0.010, 13: 0.006,
+}
+
+
+# ---------------------------------------------------------------------------
+# Data Structures
+# ---------------------------------------------------------------------------
+
+class TeamProgress:
+    def __init__(self, team_name: str, participant: str = "—"):
+        self.team_name = team_name
+        self.participant = participant
+        self.games_played = 0
+        self.achieved = {}
+        self.run_histogram = defaultdict(int)
+
+    @property
+    def remaining(self) -> list[int]:
+        return [r for r in TARGET_RUNS if r not in self.achieved]
+
+    @property
+    def completed(self) -> bool:
+        return len(self.achieved) == len(TARGET_RUNS)
+
+    @property
+    def scratched_count(self) -> int:
+        return len(self.achieved)
+
+    def record_game(self, runs: int, date: str):
+        self.games_played += 1
+        self.run_histogram[runs] += 1
+        if runs in TARGET_RUNS and runs not in self.achieved:
+            self.achieved[runs] = date
+
+    def completion_date(self) -> Optional[str]:
+        if not self.completed:
+            return None
+        return max(self.achieved.values())
+
+    def tiebreaker_key(self):
+        achieved_dates = []
+        for r in range(13, -1, -1):
+            achieved_dates.append(self.achieved.get(r, "9999-99-99"))
+        return (-self.scratched_count, self.games_played, achieved_dates)
+
+
+# ---------------------------------------------------------------------------
+# API Fetching
+# ---------------------------------------------------------------------------
+
+def _request_with_retry(url, params=None):
+    for attempt in range(1, RETRY_ATTEMPTS + 1):
+        try:
+            resp = requests.get(url, params=params, timeout=REQUEST_TIMEOUT)
+            resp.raise_for_status()
+            return resp
+        except requests.RequestException:
+            if attempt < RETRY_ATTEMPTS:
+                time.sleep(RETRY_DELAY)
+    return None
+
+
+def fetch_scores(date: str) -> list[dict]:
+    params = {
+        "sportId": 1, "date": date,
+        "hydrate": "team,linescore", "language": "en",
+    }
+    response = _request_with_retry(SCHEDULE_ENDPOINT, params=params)
+    if response is None:
+        return []
+
+    data = response.json()
+    games = []
+    for date_entry in data.get("dates", []):
+        for game in date_entry.get("games", []):
+            parsed = _parse_game(game, date)
+            if parsed:
+                games.append(parsed)
+    return games
+
+
+def _parse_game(game: dict, query_date: str) -> Optional[dict]:
+    status_code = game.get("status", {}).get("statusCode", "")
+    if status_code not in ("F", "FR", "FT"):
+        return None
+
+    teams = game.get("teams", {})
+    away_score = teams.get("away", {}).get("score")
+    home_score = teams.get("home", {}).get("score")
+    if away_score is None or home_score is None:
+        return None
+
+    return {
+        "game_id": game.get("gamePk"),
+        "date": query_date,
+        "away_team": teams["away"]["team"]["name"],
+        "away_score": int(away_score),
+        "home_team": teams["home"]["team"]["name"],
+        "home_score": int(home_score),
+    }
+
+
+def fetch_season_scores(start_date: str, end_date: str, progress_bar=None):
+    all_games = []
+    current = datetime.strptime(start_date, "%Y-%m-%d")
+    end = datetime.strptime(end_date, "%Y-%m-%d")
+    total_days = (end - current).days + 1
+
+    day_num = 0
+    while current <= end:
+        day_num += 1
+        date_str = current.strftime("%Y-%m-%d")
+        games = fetch_scores(date_str)
+        all_games.extend(games)
+        current += timedelta(days=1)
+
+        if progress_bar:
+            progress_bar.progress(day_num / total_days, text=f"Fetching {date_str}...")
+
+        time.sleep(0.2)
+
+    return all_games
+
+
+# ---------------------------------------------------------------------------
+# Pool Logic
+# ---------------------------------------------------------------------------
+
+def build_team_progress(games, participants=None):
+    participants = participants or {}
+    teams = {}
+    for name in ALL_TEAMS:
+        teams[name] = TeamProgress(name, participants.get(name, "—"))
+
+    for game in sorted(games, key=lambda g: g["date"]):
+        if game["away_team"] in teams:
+            teams[game["away_team"]].record_game(game["away_score"], game["date"])
+        if game["home_team"] in teams:
+            teams[game["home_team"]].record_game(game["home_score"], game["date"])
+
+    return teams
+
+
+def get_leaderboard(teams):
+    return sorted(teams.values(), key=lambda t: t.tiebreaker_key())
+
+
+def compute_observed_frequencies(teams):
+    total_games = 0
+    run_counts = defaultdict(int)
+    for team in teams.values():
+        total_games += team.games_played
+        for runs, count in team.run_histogram.items():
+            run_counts[runs] += count
+    if total_games == 0:
+        return HISTORICAL_RUN_FREQ.copy()
+    return {r: run_counts[r] / total_games for r in range(0, 20)}
+
+
+def blended_frequencies(observed, total_team_games, blend_games=50):
+    if total_team_games == 0:
+        return HISTORICAL_RUN_FREQ.copy()
+    obs_weight = total_team_games / (total_team_games + blend_games)
+    hist_weight = 1.0 - obs_weight
+    return {
+        r: obs_weight * observed.get(r, 0.0) + hist_weight * HISTORICAL_RUN_FREQ.get(r, 0.001)
+        for r in TARGET_RUNS
+    }
+
+
+def monte_carlo_expected_games(remaining, freq, games_played=0, n_simulations=MC_SIMULATIONS):
+    if not remaining:
+        return {
+            "expected_games": 0, "median_games": 0,
+            "p25": 0, "p75": 0, "p90": 0,
+            "completion_prob_30": 1.0, "completion_prob_season": 1.0,
+        }
+
+    outcomes = list(range(0, 25))
+    probs = [freq.get(r, 0.001 if r <= 13 else 0.002) for r in outcomes]
+    total_p = sum(probs)
+    probs = [p / total_p for p in probs]
+    games_left_in_season = max(162 - games_played, 0)
+
+    results = []
+    for _ in range(n_simulations):
+        needed = set(remaining)
+        games = 0
+        while needed and games < 1000:
+            games += 1
+            r = random.choices(outcomes, weights=probs, k=1)[0]
+            needed.discard(r)
+        results.append(games)
+
+    results.sort()
+    n = len(results)
+    return {
+        "expected_games": sum(results) / n,
+        "median_games": results[n // 2],
+        "p25": results[n // 4],
+        "p75": results[3 * n // 4],
+        "p90": results[int(n * 0.9)],
+        "completion_prob_30": sum(1 for g in results if g <= 30) / n,
+        "completion_prob_season": sum(1 for g in results if g <= games_left_in_season) / n,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Streamlit App
+# ---------------------------------------------------------------------------
+
+def main():
+    st.set_page_config(
+        page_title="MLB 13-Run Pool Tracker",
+        page_icon="⚾",
+        layout="wide",
+        initial_sidebar_state="expanded",
+    )
+
+    # --- Custom CSS ---
+    st.markdown("""
+    <style>
+    .scratched {
+        background-color: #22c55e;
+        color: white;
+        padding: 6px 10px;
+        border-radius: 6px;
+        font-weight: bold;
+        text-align: center;
+        font-size: 0.85rem;
+    }
+    .needed {
+        background-color: #374151;
+        color: #9ca3af;
+        padding: 6px 10px;
+        border-radius: 6px;
+        text-align: center;
+        font-size: 0.85rem;
+    }
+    .winner-banner {
+        background: linear-gradient(135deg, #f59e0b, #ef4444);
+        color: white;
+        padding: 16px 24px;
+        border-radius: 12px;
+        text-align: center;
+        font-size: 1.2rem;
+        font-weight: bold;
+        margin-bottom: 16px;
+    }
+    .metric-card {
+        background-color: #1e293b;
+        padding: 16px;
+        border-radius: 10px;
+        text-align: center;
+    }
+    .metric-card h3 {
+        margin: 0;
+        font-size: 2rem;
+        color: #60a5fa;
+    }
+    .metric-card p {
+        margin: 4px 0 0 0;
+        color: #94a3b8;
+        font-size: 0.8rem;
+    }
+    div[data-testid="stDataFrame"] table {
+        font-size: 0.85rem;
+    }
+    </style>
+    """, unsafe_allow_html=True)
+
+    # --- Title ---
+    st.title("⚾ MLB 13-Run Pool Tracker")
+
+    # --- Sidebar ---
+    with st.sidebar:
+        st.header("Settings")
+
+        st.subheader("Date Range")
+        start_date = st.date_input(
+            "Season start",
+            value=datetime.strptime(OPENING_DAY, "%Y-%m-%d").date(),
+            help="Opening Day 2026"
+        )
+        end_date = st.date_input(
+            "Through date",
+            value=datetime.now().date(),
+            help="Fetch scores through this date"
+        )
+
+        st.divider()
+
+        st.subheader("Participant Assignments")
+        st.caption("Map pool members to teams. Leave blank for unassigned.")
+
+        # Use session state for participants
+        if "participants" not in st.session_state:
+            st.session_state.participants = {}
+
+        # Upload option
+        uploaded = st.file_uploader(
+            "Upload assignments (JSON)", type=["json"],
+            help='Format: {"New York Yankees": "John", ...}'
+        )
+        if uploaded:
+            try:
+                st.session_state.participants = json.load(uploaded)
+                st.success(f"Loaded {len(st.session_state.participants)} assignments")
+            except Exception as e:
+                st.error(f"Invalid JSON: {e}")
+
+        # Manual entry via expander
+        with st.expander("Edit assignments manually"):
+            for team in ALL_TEAMS:
+                val = st.text_input(
+                    SHORT_NAMES.get(team, team),
+                    value=st.session_state.participants.get(team, ""),
+                    key=f"p_{team}",
+                    label_visibility="visible",
+                )
+                if val.strip():
+                    st.session_state.participants[team] = val.strip()
+                elif team in st.session_state.participants:
+                    del st.session_state.participants[team]
+
+        st.divider()
+
+        st.subheader("Simulations")
+        sim_count = st.select_slider(
+            "Monte Carlo runs",
+            options=[1000, 5000, 10000, 20000, 50000],
+            value=10000,
+            help="More = slower but more precise estimates"
+        )
+
+        fetch_btn = st.button("🔄 Fetch Scores", type="primary", use_container_width=True)
+
+    # --- Main content ---
+    # Check for cached data or trigger fetch
+    if fetch_btn or "games" not in st.session_state:
+        if fetch_btn or "games" not in st.session_state:
+            start_str = start_date.strftime("%Y-%m-%d")
+            end_str = end_date.strftime("%Y-%m-%d")
+
+            progress_bar = st.progress(0, text="Fetching scores from MLB API...")
+            games = fetch_season_scores(start_str, end_str, progress_bar)
+            progress_bar.empty()
+
+            st.session_state.games = games
+            st.session_state.end_date = end_str
+
+    games = st.session_state.get("games", [])
+
+    if not games:
+        st.warning(
+            "No completed games found. The season may not have started yet, "
+            "or there may be a connectivity issue with the MLB API."
+        )
+        st.info("The 2026 MLB season begins March 26, 2026.")
+        return
+
+    # Build all derived data
+    participants = st.session_state.get("participants", {})
+    teams = build_team_progress(games, participants)
+    board = get_leaderboard(teams)
+
+    observed = compute_observed_frequencies(teams)
+    avg_gp = sum(t.games_played for t in teams.values()) / len(teams)
+    freq = blended_frequencies(observed, int(avg_gp))
+
+    end_str = st.session_state.get("end_date", "—")
+
+    # --- Top metrics ---
+    leader = board[0]
+    total_games = len(games)
+    most_scratched = leader.scratched_count
+    completed_teams = sum(1 for t in board if t.completed)
+
+    col1, col2, col3, col4 = st.columns(4)
+    col1.metric("Games Fetched", f"{total_games:,}")
+    col2.metric("Leader", f"{SHORT_NAMES.get(leader.team_name, leader.team_name)}")
+    col3.metric("Best Progress", f"{most_scratched}/14")
+    col4.metric("Teams Finished", f"{completed_teams}/30")
+
+    # Winner banner
+    winners = [t for t in board if t.completed]
+    if winners:
+        w = winners[0]
+        st.markdown(
+            f'<div class="winner-banner">🏆 WINNER: {w.team_name} '
+            f'({w.participant}) — Completed {w.completion_date()} '
+            f'in {w.games_played} games</div>',
+            unsafe_allow_html=True
+        )
+
+    st.caption(f"Data through: **{end_str}**")
+
+    # --- Tabs ---
+    tab_board, tab_grid, tab_detail, tab_odds, tab_race = st.tabs([
+        "📋 Leaderboard",
+        "🔲 Scratch-Off Grid",
+        "🔍 Team Detail",
+        "📊 Run Probabilities",
+        "🏁 Race Projections",
+    ])
+
+    # ========================== TAB 1: LEADERBOARD ==========================
+    with tab_board:
+        rows = []
+        for rank, team in enumerate(board, 1):
+            remaining = team.remaining
+            rows.append({
+                "Rank": rank,
+                "Team": team.team_name,
+                "Abbr": SHORT_NAMES.get(team.team_name, ""),
+                "Owner": team.participant,
+                "Scratched": team.scratched_count,
+                "GP": team.games_played,
+                "Remaining": ", ".join(str(r) for r in remaining) if remaining else "COMPLETE",
+                "# Left": len(remaining),
+            })
+
+        df = pd.DataFrame(rows)
+        st.dataframe(
+            df,
+            use_container_width=True,
+            hide_index=True,
+            column_config={
+                "Rank": st.column_config.NumberColumn("Rank", width="small"),
+                "Scratched": st.column_config.ProgressColumn(
+                    "Progress", min_value=0, max_value=14, format="%d/14"
+                ),
+            },
+        )
+
+    # ======================== TAB 2: SCRATCH-OFF GRID ========================
+    with tab_grid:
+        st.subheader("Scratch-Off Grid")
+        st.caption("Green = achieved, dark = still needed")
+
+        # Build heatmap data
+        grid_teams = [SHORT_NAMES.get(t.team_name, t.team_name) for t in board]
+        grid_data = []
+        hover_data = []
+        for team in board:
+            row = []
+            hover_row = []
+            for r in TARGET_RUNS:
+                if r in team.achieved:
+                    row.append(1)
+                    hover_row.append(f"{team.team_name}<br>Runs: {r}<br>Date: {team.achieved[r]}")
+                else:
+                    row.append(0)
+                    hover_row.append(f"{team.team_name}<br>Runs: {r}<br>NOT YET")
+            grid_data.append(row)
+            hover_data.append(hover_row)
+
+        fig_grid = go.Figure(data=go.Heatmap(
+            z=grid_data,
+            x=[str(r) for r in TARGET_RUNS],
+            y=grid_teams,
+            text=hover_data,
+            hoverinfo="text",
+            colorscale=[[0, "#1f2937"], [1, "#22c55e"]],
+            showscale=False,
+            xgap=2,
+            ygap=2,
+        ))
+
+        fig_grid.update_layout(
+            xaxis_title="Run Total",
+            yaxis=dict(autorange="reversed"),
+            height=max(500, len(board) * 22),
+            margin=dict(l=10, r=10, t=30, b=40),
+            font=dict(size=11),
+        )
+
+        st.plotly_chart(fig_grid, use_container_width=True)
+
+    # ======================== TAB 3: TEAM DETAIL ========================
+    with tab_detail:
+        selected_team_name = st.selectbox(
+            "Select a team",
+            [t.team_name for t in board],
+            format_func=lambda x: f"{SHORT_NAMES.get(x, x)} — {x} ({participants.get(x, '—')})"
+        )
+
+        team = teams[selected_team_name]
+
+        # Progress visualization
+        st.subheader(f"{team.team_name}")
+        if team.participant != "—":
+            st.caption(f"Owner: {team.participant}")
+
+        col_gp, col_done, col_left = st.columns(3)
+        col_gp.metric("Games Played", team.games_played)
+        col_done.metric("Scratched Off", f"{team.scratched_count}/14")
+        col_left.metric("Remaining", len(team.remaining))
+
+        # Visual scratch card
+        cols = st.columns(14)
+        for i, r in enumerate(TARGET_RUNS):
+            with cols[i]:
+                if r in team.achieved:
+                    st.markdown(f'<div class="scratched">{r}</div>', unsafe_allow_html=True)
+                    st.caption(team.achieved[r][5:])  # show MM-DD
+                else:
+                    st.markdown(f'<div class="needed">{r}</div>', unsafe_allow_html=True)
+                    st.caption("—")
+
+        # Achievement timeline
+        if team.achieved:
+            st.subheader("Achievement Timeline")
+            timeline_data = sorted(team.achieved.items(), key=lambda x: x[1])
+            timeline_df = pd.DataFrame(
+                [{"Run Total": r, "Date": d, "Game #": "—"} for r, d in timeline_data]
+            )
+            st.dataframe(timeline_df, use_container_width=True, hide_index=True)
+
+        # Run histogram
+        if team.games_played > 0:
+            st.subheader("Scoring Distribution")
+            hist_data = []
+            for r in range(0, max(team.run_histogram.keys()) + 1 if team.run_histogram else 14):
+                count = team.run_histogram.get(r, 0)
+                hist_data.append({"Runs": r, "Games": count})
+
+            hist_df = pd.DataFrame(hist_data)
+            fig_hist = px.bar(
+                hist_df, x="Runs", y="Games",
+                color_discrete_sequence=["#3b82f6"],
+                title=f"How often {SHORT_NAMES.get(team.team_name, team.team_name)} scores N runs"
+            )
+            fig_hist.update_layout(
+                xaxis=dict(dtick=1),
+                margin=dict(t=40, b=30),
+                height=300,
+            )
+            st.plotly_chart(fig_hist, use_container_width=True)
+
+        # Monte Carlo projection
+        if team.remaining and team.games_played > 0:
+            st.subheader("Projection")
+            with st.spinner("Running Monte Carlo simulation..."):
+                sim = monte_carlo_expected_games(
+                    team.remaining, freq,
+                    games_played=team.games_played,
+                    n_simulations=sim_count
+                )
+
+            games_left = 162 - team.games_played
+            pcol1, pcol2, pcol3 = st.columns(3)
+            pcol1.metric("Expected Games to Finish", f"~{sim['expected_games']:.0f}")
+            pcol2.metric("Median", f"{sim['median_games']:.0f}")
+            pcol3.metric(
+                f"Finish This Season ({games_left} GP left)",
+                f"{sim['completion_prob_season']*100:.1f}%"
+            )
+
+            hardest = max(team.remaining, key=lambda r: 1.0 / freq.get(r, 0.001))
+            hardest_p = freq.get(hardest, 0.001)
+            st.info(
+                f"Hardest remaining: **{hardest} runs** — happens ~{hardest_p*100:.1f}% "
+                f"of games (~1 in {1/hardest_p:.0f})"
+            )
+
+    # ====================== TAB 4: RUN PROBABILITIES ======================
+    with tab_odds:
+        st.subheader("Run-Scoring Probability Analysis")
+        st.caption("Historical MLB averages blended with this season's observed data")
+
+        prob_rows = []
+        for r in TARGET_RUNS:
+            hist = HISTORICAL_RUN_FREQ.get(r, 0.0)
+            obs = observed.get(r, 0.0)
+            blend = freq.get(r, 0.0)
+            one_in = 1 / blend if blend > 0 else float("inf")
+            prob_rows.append({
+                "Runs": r,
+                "Historical": f"{hist:.1%}",
+                "This Season": f"{obs:.1%}" if avg_gp > 0 else "—",
+                "Blended": f"{blend:.1%}",
+                "~1 in N games": f"{one_in:.1f}",
+            })
+
+        prob_df = pd.DataFrame(prob_rows)
+        st.dataframe(prob_df, use_container_width=True, hide_index=True)
+
+        # Bar chart comparing historical vs observed
+        chart_df = pd.DataFrame({
+            "Runs": TARGET_RUNS * 2,
+            "Probability": (
+                [HISTORICAL_RUN_FREQ.get(r, 0) for r in TARGET_RUNS] +
+                [freq.get(r, 0) for r in TARGET_RUNS]
+            ),
+            "Source": (["Historical"] * 14) + (["Blended (this season)"] * 14),
+        })
+
+        fig_prob = px.bar(
+            chart_df, x="Runs", y="Probability", color="Source",
+            barmode="group",
+            color_discrete_map={"Historical": "#64748b", "Blended (this season)": "#3b82f6"},
+            title="Probability of Scoring Exactly N Runs"
+        )
+        fig_prob.update_layout(
+            xaxis=dict(dtick=1),
+            yaxis=dict(tickformat=".1%"),
+            height=400,
+            margin=dict(t=40),
+        )
+        st.plotly_chart(fig_prob, use_container_width=True)
+
+        # Insight callouts
+        st.markdown(f"""
+**Key insights:**
+- Scoring exactly **13 runs** happens roughly once every **{1/freq.get(13, 0.006):.0f}** games (~{freq.get(13,0.006)*100:.1f}% per game). This is the bottleneck for most teams.
+- Getting **shut out (0 runs)** is also relatively rare at ~1 in {1/freq.get(0, 0.07):.0f} games.
+- The sweet spot (3–5 runs) accounts for ~{(freq.get(3,0)+freq.get(4,0)+freq.get(5,0))*100:.0f}% of all games.
+- Runs 10+ are the "long tail" — combined they happen only ~{sum(freq.get(r,0) for r in range(10,14))*100:.1f}% of the time.
+        """)
+
+    # ====================== TAB 5: RACE PROJECTIONS ======================
+    with tab_race:
+        st.subheader("Race to Finish — Projected Completion")
+
+        with st.spinner("Running simulations for all 30 teams..."):
+            race_rows = []
+            for team in board:
+                if team.completed:
+                    race_rows.append({
+                        "Team": team.team_name,
+                        "Abbr": SHORT_NAMES.get(team.team_name, ""),
+                        "Owner": team.participant,
+                        "Scratched": team.scratched_count,
+                        "GP": team.games_played,
+                        "Exp. Games Left": 0,
+                        "Season Finish %": 100.0,
+                        "Status": f"DONE ({team.completion_date()})",
+                    })
+                elif team.games_played > 0:
+                    sim = monte_carlo_expected_games(
+                        team.remaining, freq,
+                        games_played=team.games_played,
+                        n_simulations=sim_count
+                    )
+                    race_rows.append({
+                        "Team": team.team_name,
+                        "Abbr": SHORT_NAMES.get(team.team_name, ""),
+                        "Owner": team.participant,
+                        "Scratched": team.scratched_count,
+                        "GP": team.games_played,
+                        "Exp. Games Left": round(sim["expected_games"]),
+                        "Season Finish %": round(sim["completion_prob_season"] * 100, 1),
+                        "Status": f"Need {len(team.remaining)} more",
+                    })
+
+        race_df = pd.DataFrame(race_rows)
+        if not race_df.empty:
+            race_df = race_df.sort_values("Exp. Games Left")
+
+            st.dataframe(
+                race_df,
+                use_container_width=True,
+                hide_index=True,
+                column_config={
+                    "Season Finish %": st.column_config.ProgressColumn(
+                        "Season Finish %", min_value=0, max_value=100, format="%.1f%%"
+                    ),
+                    "Scratched": st.column_config.ProgressColumn(
+                        "Progress", min_value=0, max_value=14, format="%d/14"
+                    ),
+                },
+            )
+
+            # Chart: expected games remaining
+            fig_race = px.bar(
+                race_df.sort_values("Exp. Games Left"),
+                x="Abbr", y="Exp. Games Left",
+                color="Season Finish %",
+                color_continuous_scale="RdYlGn",
+                title="Expected Games Remaining to Complete Pool",
+                range_color=[0, 100],
+            )
+            fig_race.update_layout(
+                xaxis_title="Team",
+                height=400,
+                margin=dict(t=40),
+            )
+            st.plotly_chart(fig_race, use_container_width=True)
+
+    # --- Footer ---
+    st.divider()
+    st.caption(
+        "Data sourced from the MLB Stats API (statsapi.mlb.com). "
+        "Probabilities use a Bayesian blend of historical frequencies (2014–2024) "
+        "and observed season data. Projections via Monte Carlo simulation."
+    )
+
+
+if __name__ == "__main__":
+    main()
