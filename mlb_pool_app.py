@@ -134,12 +134,16 @@ def _request_with_retry(url, params=None):
 
 def fetch_scores_range(start_date: str, end_date: str) -> list[dict]:
     """Fetch all completed MLB games in a date range (up to ~1 month per call)."""
+    # IMPORTANT: Only fetch regular season (R) by default.
+    # Including spring training (S), exhibition (E), or all-star (A) can
+    # contaminate scores — e.g., a spring training game on Opening Day
+    # between the same two teams with different scores.
     params = {
         "sportId": 1,
         "startDate": start_date,
         "endDate": end_date,
         "hydrate": "team,linescore",
-        "gameType": "R,F,D,L,W,C,P",  # Regular, postseason, etc.
+        "gameType": "R",  # Regular season only
         "language": "en",
     }
     response = _request_with_retry(SCHEDULE_ENDPOINT, params=params)
@@ -148,11 +152,13 @@ def fetch_scores_range(start_date: str, end_date: str) -> list[dict]:
 
     data = response.json()
     games = []
+    seen_game_ids = set()  # Deduplicate by gamePk
     for date_entry in data.get("dates", []):
         game_date = date_entry.get("date", "")
         for game in date_entry.get("games", []):
             parsed = _parse_game(game, game_date)
-            if parsed:
+            if parsed and parsed["game_id"] not in seen_game_ids:
+                seen_game_ids.add(parsed["game_id"])
                 games.append(parsed)
     return games
 
@@ -171,12 +177,17 @@ def _parse_game(game: dict, game_date: str) -> Optional[dict]:
     # Use the officialDate from the game if available, fallback to date_entry date
     official_date = game.get("officialDate", game_date)
 
+    # Normalize team names: strip whitespace, collapse internal spaces
+    away_name = " ".join(teams["away"]["team"]["name"].split())
+    home_name = " ".join(teams["home"]["team"]["name"].split())
+
     return {
         "game_id": game.get("gamePk"),
+        "game_type": game.get("gameType", "R"),
         "date": official_date,
-        "away_team": teams["away"]["team"]["name"],
+        "away_team": away_name,
         "away_score": int(away_score),
-        "home_team": teams["home"]["team"]["name"],
+        "home_team": home_name,
         "home_score": int(home_score),
     }
 
@@ -527,12 +538,13 @@ def main():
     st.caption(f"Data through: **{end_str}**")
 
     # --- Tabs ---
-    tab_board, tab_grid, tab_detail, tab_odds, tab_race = st.tabs([
+    tab_board, tab_grid, tab_detail, tab_odds, tab_race, tab_debug = st.tabs([
         "📋 Leaderboard",
         "🔲 Scratch-Off Grid",
         "🔍 Team Detail",
         "📊 Run Probabilities",
         "🏁 Race Projections",
+        "🛠 Raw Data",
     ])
 
     # ========================== TAB 1: LEADERBOARD ==========================
@@ -827,6 +839,92 @@ def main():
                 margin=dict(t=40),
             )
             st.plotly_chart(fig_race, use_container_width=True)
+
+    # ======================== TAB 6: RAW DATA / DEBUG ========================
+    with tab_debug:
+        st.subheader("Raw Data & Diagnostics")
+        st.caption(
+            "Use this tab to verify the data the app is working with. "
+            "If a team or game is missing, check here first."
+        )
+
+        # Team names the API returned
+        api_names = discover_team_names(games)
+        st.markdown("**Team names from API** (these are the exact strings the MLB API returned):")
+        api_names_sorted = sorted(api_names)
+        name_rows = []
+        for name in api_names_sorted:
+            in_hardcoded = "Yes" if name in ALL_TEAMS else "NO — not in built-in list"
+            abbr = SHORT_NAMES.get(name, "auto-generated")
+            gp = teams[name].games_played if name in teams else 0
+            name_rows.append({
+                "API Team Name": name,
+                "Abbreviation": abbr,
+                "In Built-in List?": in_hardcoded,
+                "Games Played": gp,
+            })
+        st.dataframe(pd.DataFrame(name_rows), use_container_width=True, hide_index=True)
+
+        # Any hardcoded names with 0 games (potential mismatch)
+        zero_game_teams = [t.team_name for t in teams.values() if t.games_played == 0]
+        if zero_game_teams:
+            st.warning(
+                f"**Teams with 0 games**: {', '.join(sorted(zero_game_teams))}. "
+                f"If the season has started, these teams may have a name mismatch — "
+                f"the API might be using a different name than what's in the built-in list."
+            )
+
+        st.divider()
+
+        # Raw game log
+        st.markdown("**All fetched games** (most recent first):")
+        game_log_rows = []
+        for g in sorted(games, key=lambda x: x["date"], reverse=True):
+            game_log_rows.append({
+                "Date": g["date"],
+                "Game ID": g["game_id"],
+                "Type": g.get("game_type", "?"),
+                "Away Team": g["away_team"],
+                "Away Score": g["away_score"],
+                "Home Team": g["home_team"],
+                "Home Score": g["home_score"],
+            })
+        st.dataframe(
+            pd.DataFrame(game_log_rows),
+            use_container_width=True,
+            hide_index=True,
+            height=400,
+        )
+
+        st.caption(f"Total games loaded: {len(games)}")
+
+        # Search for a specific team
+        st.divider()
+        search_team = st.text_input("Search for a team name in raw data", placeholder="e.g. Brewers")
+        if search_team:
+            matches = [
+                g for g in games
+                if search_team.lower() in g["away_team"].lower()
+                or search_team.lower() in g["home_team"].lower()
+            ]
+            if matches:
+                st.success(f"Found {len(matches)} game(s) matching '{search_team}':")
+                match_rows = []
+                for g in matches:
+                    match_rows.append({
+                        "Date": g["date"],
+                        "Game ID": g["game_id"],
+                        "Type": g.get("game_type", "?"),
+                        "Away": f"{g['away_team']} ({g['away_score']})",
+                        "Home": f"{g['home_team']} ({g['home_score']})",
+                    })
+                st.dataframe(pd.DataFrame(match_rows), use_container_width=True, hide_index=True)
+            else:
+                st.error(
+                    f"No games found matching '{search_team}'. "
+                    f"The API may be using a different team name. "
+                    f"Check the team name list above."
+                )
 
     # --- Footer ---
     st.divider()
