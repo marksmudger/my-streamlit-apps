@@ -281,8 +281,37 @@ def build_team_progress(games, participants=None):
     return teams
 
 
-def get_leaderboard(teams):
-    return sorted(teams.values(), key=lambda t: t.tiebreaker_key())
+def get_leaderboard(teams, freq=None):
+    """Rank teams by projected total games to finish (lowest = best).
+
+    If freq (blended run frequencies) is provided, the ranking uses Monte Carlo
+    simulation to estimate how many additional games each team needs, then sorts
+    by games_played + expected_remaining.  Teams that finish in fewer total games
+    rank higher.  Ties break on (1) fewest games played so far, then (2) earliest
+    achievement of the highest run total.
+
+    If freq is not provided, falls back to the legacy deterministic sort.
+    """
+    if freq is None:
+        return sorted(teams.values(), key=lambda t: t.tiebreaker_key())
+
+    team_projections = {}
+    for name, team in teams.items():
+        if team.completed:
+            team_projections[name] = team.games_played
+        else:
+            sim = monte_carlo_expected_games(
+                team.remaining, freq, games_played=team.games_played
+            )
+            team_projections[name] = team.games_played + sim["expected_games"]
+
+    def projection_key(team):
+        proj = team_projections[team.team_name]
+        # Secondary: fewest games played; tertiary: earliest highest run total
+        achieved_dates = [team.achieved.get(r, "9999-99-99") for r in range(13, -1, -1)]
+        return (proj, team.games_played, achieved_dates)
+
+    return sorted(teams.values(), key=projection_key)
 
 
 def compute_observed_frequencies(teams):
@@ -483,11 +512,12 @@ def main():
     # Build all derived data
     participants = st.session_state.get("participants", {})
     teams = build_team_progress(games, participants)
-    board = get_leaderboard(teams)
 
     observed = compute_observed_frequencies(teams)
     avg_gp = sum(t.games_played for t in teams.values()) / len(teams)
     freq = blended_frequencies(observed, int(avg_gp))
+
+    board = get_leaderboard(teams, freq)
 
     end_str = st.session_state.get("end_date", "-")
 
@@ -519,9 +549,11 @@ def main():
     col2.metric(
         "Pool Leader", nickname(leader.team_name),
         help=(
-            "The app ranks teams by: (1) most run totals scratched off, "
-            "(2) fewest games played as a tiebreaker, then "
-            "(3) which team scratched off the highest run total earliest"
+            "The app ranks teams by projected total games to finish, "
+            "using Monte Carlo simulation. The team expected to scratch off "
+            "all 14 run totals in the fewest games ranks first. "
+            "Ties break on fewest games played, then earliest achievement "
+            "of the highest run total."
         )
     )
     col3.metric(
@@ -558,15 +590,29 @@ def main():
 
     # ========================== TAB 1: LEADERBOARD ==========================
     with tab_board:
+        st.caption(
+            "Teams rank by projected total games to finish. The simulation "
+            "accounts for how hard each remaining run total is to achieve, "
+            "so a team missing rare totals like 0 and 13 ranks lower than "
+            "one missing common totals like 4 and 5."
+        )
         rows = []
         for rank, team in enumerate(board, 1):
             remaining = team.remaining
-            games_left = SEASON_GAMES - team.games_played
+            if team.completed:
+                proj_label = f"Done in {team.games_played}"
+            else:
+                sim = monte_carlo_expected_games(
+                    remaining, freq, games_played=team.games_played
+                )
+                proj_total = team.games_played + sim["expected_games"]
+                proj_label = f"~{proj_total:.0f} of {SEASON_GAMES}"
             rows.append({
                 "Rank": rank,
                 "Team": nickname(team.team_name),
                 "Owner": team.participant,
                 "Scratched": team.scratched_count,
+                "Projected Finish": proj_label,
                 "Games Played": f"{team.games_played} of {SEASON_GAMES}",
                 "Run Totals Still Needed": ", ".join(str(r) for r in remaining) if remaining else "COMPLETE",
                 "Still Need": len(remaining),
