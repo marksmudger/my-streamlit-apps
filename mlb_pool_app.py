@@ -1,6 +1,6 @@
 """
-MLB 13-Run Pool Tracker -- Streamlit Dashboard
-================================================
+MLB 13-Run Pool Tracker — Streamlit Dashboard
+===============================================
 Interactive web dashboard for tracking the 13-run pool.
 
 Run with:
@@ -32,7 +32,6 @@ RETRY_ATTEMPTS = 3
 RETRY_DELAY = 2
 
 OPENING_DAY = "2026-03-26"
-SEASON_GAMES = 162
 TARGET_RUNS = list(range(0, 14))
 MC_SIMULATIONS = 10_000
 
@@ -49,7 +48,7 @@ ALL_TEAMS = [
     "Texas Rangers", "Toronto Blue Jays", "Washington Nationals",
 ]
 
-# City abbreviations (used internally, not for display)
+# Short display names for compact tables
 SHORT_NAMES = {
     "Arizona Diamondbacks": "ARI", "Atlanta Braves": "ATL",
     "Baltimore Orioles": "BAL", "Boston Red Sox": "BOS",
@@ -68,25 +67,6 @@ SHORT_NAMES = {
     "Toronto Blue Jays": "TOR", "Washington Nationals": "WSH",
 }
 
-# Team nicknames for chart labels (e.g. "Brewers" instead of "MIL")
-TEAM_NICKNAMES = {
-    "Arizona Diamondbacks": "D-backs", "Atlanta Braves": "Braves",
-    "Baltimore Orioles": "Orioles", "Boston Red Sox": "Red Sox",
-    "Chicago Cubs": "Cubs", "Chicago White Sox": "White Sox",
-    "Cincinnati Reds": "Reds", "Cleveland Guardians": "Guardians",
-    "Colorado Rockies": "Rockies", "Detroit Tigers": "Tigers",
-    "Houston Astros": "Astros", "Kansas City Royals": "Royals",
-    "Los Angeles Angels": "Angels", "Los Angeles Dodgers": "Dodgers",
-    "Miami Marlins": "Marlins", "Milwaukee Brewers": "Brewers",
-    "Minnesota Twins": "Twins", "New York Mets": "Mets",
-    "New York Yankees": "Yankees", "Oakland Athletics": "Athletics",
-    "Philadelphia Phillies": "Phillies", "Pittsburgh Pirates": "Pirates",
-    "San Diego Padres": "Padres", "San Francisco Giants": "Giants",
-    "Seattle Mariners": "Mariners", "St. Louis Cardinals": "Cardinals",
-    "Tampa Bay Rays": "Rays", "Texas Rangers": "Rangers",
-    "Toronto Blue Jays": "Blue Jays", "Washington Nationals": "Nationals",
-}
-
 HISTORICAL_RUN_FREQ = {
     0: 0.070, 1: 0.098, 2: 0.123, 3: 0.138, 4: 0.136,
     5: 0.118, 6: 0.095, 7: 0.072, 8: 0.051, 9: 0.036,
@@ -94,17 +74,12 @@ HISTORICAL_RUN_FREQ = {
 }
 
 
-def nickname(full_name: str) -> str:
-    """Return the team nickname (e.g. 'Brewers') or fall back to the full name."""
-    return TEAM_NICKNAMES.get(full_name, full_name)
-
-
 # ---------------------------------------------------------------------------
 # Data Structures
 # ---------------------------------------------------------------------------
 
 class TeamProgress:
-    def __init__(self, team_name: str, participant: str = "-"):
+    def __init__(self, team_name: str, participant: str = "—"):
         self.team_name = team_name
         self.participant = participant
         self.games_played = 0
@@ -158,13 +133,17 @@ def _request_with_retry(url, params=None):
 
 
 def fetch_scores_range(start_date: str, end_date: str) -> list[dict]:
-    """Fetch all completed regular-season MLB games in a date range."""
+    """Fetch all completed MLB games in a date range (up to ~1 month per call)."""
+    # IMPORTANT: Only fetch regular season (R) by default.
+    # Including spring training (S), exhibition (E), or all-star (A) can
+    # contaminate scores — e.g., a spring training game on Opening Day
+    # between the same two teams with different scores.
     params = {
         "sportId": 1,
         "startDate": start_date,
         "endDate": end_date,
         "hydrate": "team,linescore",
-        "gameType": "R",
+        "gameType": "R",  # Regular season only
         "language": "en",
     }
     response = _request_with_retry(SCHEDULE_ENDPOINT, params=params)
@@ -173,7 +152,7 @@ def fetch_scores_range(start_date: str, end_date: str) -> list[dict]:
 
     data = response.json()
     games = []
-    seen_game_ids = set()
+    seen_game_ids = set()  # Deduplicate by gamePk
     for date_entry in data.get("dates", []):
         game_date = date_entry.get("date", "")
         for game in date_entry.get("games", []):
@@ -195,7 +174,10 @@ def _parse_game(game: dict, game_date: str) -> Optional[dict]:
     if away_score is None or home_score is None:
         return None
 
+    # Use the officialDate from the game if available, fallback to date_entry date
     official_date = game.get("officialDate", game_date)
+
+    # Normalize team names: strip whitespace, collapse internal spaces
     away_name = " ".join(teams["away"]["team"]["name"].split())
     home_name = " ".join(teams["home"]["team"]["name"].split())
 
@@ -211,12 +193,12 @@ def _parse_game(game: dict, game_date: str) -> Optional[dict]:
 
 
 def fetch_season_scores(start_date: str, end_date: str, progress_bar=None):
-    """Fetch all games in chunks of 30 days."""
+    """Fetch all games in chunks of 30 days (MLB API supports date ranges)."""
     all_games = []
     current = datetime.strptime(start_date, "%Y-%m-%d")
     end = datetime.strptime(end_date, "%Y-%m-%d")
     total_days = (end - current).days + 1
-    chunk_size = 30
+    chunk_size = 30  # days per API call
 
     elapsed = 0
     while current <= end:
@@ -258,21 +240,25 @@ def build_team_progress(games, participants=None):
     participants = participants or {}
     teams = {}
 
+    # Dynamically build team list from whatever the API actually returns,
+    # so we never silently drop a team due to a name mismatch.
     api_names = discover_team_names(games)
 
+    # Start with API-discovered names (these are ground truth)
     for name in api_names:
-        teams[name] = TeamProgress(name, participants.get(name, "-"))
-        if name not in SHORT_NAMES:
+        abbr = SHORT_NAMES.get(name, "")
+        teams[name] = TeamProgress(name, participants.get(name, "—"))
+        # If no abbreviation exists yet, create one from the team name
+        if not abbr and name not in SHORT_NAMES:
             SHORT_NAMES[name] = "".join(
                 word[0] for word in name.split() if word[0].isupper()
             )[:3].upper()
-        if name not in TEAM_NICKNAMES:
-            # Use last word of name as fallback nickname
-            TEAM_NICKNAMES[name] = name.split()[-1]
 
+    # Also include any hardcoded teams that didn't appear in games yet
+    # (e.g., if fetching a partial date range where a team had an off day)
     for name in ALL_TEAMS:
         if name not in teams:
-            teams[name] = TeamProgress(name, participants.get(name, "-"))
+            teams[name] = TeamProgress(name, participants.get(name, "—"))
 
     for game in sorted(games, key=lambda g: g["date"]):
         teams[game["away_team"]].record_game(game["away_score"], game["date"])
@@ -349,7 +335,7 @@ def monte_carlo_expected_games(remaining, freq, games_played=0, n_simulations=MC
     probs = [freq.get(r, 0.001 if r <= 13 else 0.002) for r in outcomes]
     total_p = sum(probs)
     probs = [p / total_p for p in probs]
-    games_left_in_season = max(SEASON_GAMES - games_played, 0)
+    games_left_in_season = max(162 - games_played, 0)
 
     results = []
     for _ in range(n_simulations):
@@ -390,22 +376,21 @@ def main():
     st.markdown("""
     <style>
     .scratched {
-        background-color: #2563eb;
+        background-color: #22c55e;
         color: white;
-        padding: 8px 10px;
+        padding: 6px 10px;
         border-radius: 6px;
         font-weight: bold;
         text-align: center;
-        font-size: 0.9rem;
+        font-size: 0.85rem;
     }
     .needed {
-        background-color: #fef3c7;
-        color: #92400e;
-        padding: 8px 10px;
+        background-color: #374151;
+        color: #9ca3af;
+        padding: 6px 10px;
         border-radius: 6px;
         text-align: center;
-        font-size: 0.9rem;
-        border: 1px solid #fde68a;
+        font-size: 0.85rem;
     }
     .winner-banner {
         background: linear-gradient(135deg, #f59e0b, #ef4444);
@@ -417,6 +402,22 @@ def main():
         font-weight: bold;
         margin-bottom: 16px;
     }
+    .metric-card {
+        background-color: #1e293b;
+        padding: 16px;
+        border-radius: 10px;
+        text-align: center;
+    }
+    .metric-card h3 {
+        margin: 0;
+        font-size: 2rem;
+        color: #60a5fa;
+    }
+    .metric-card p {
+        margin: 4px 0 0 0;
+        color: #94a3b8;
+        font-size: 0.8rem;
+    }
     div[data-testid="stDataFrame"] table {
         font-size: 0.85rem;
     }
@@ -424,7 +425,7 @@ def main():
     """, unsafe_allow_html=True)
 
     # --- Title ---
-    st.title("MLB 13-Run Pool Tracker")
+    st.title("⚾ MLB 13-Run Pool Tracker")
 
     # --- Sidebar ---
     with st.sidebar:
@@ -447,9 +448,11 @@ def main():
         st.subheader("Participant Assignments")
         st.caption("Map pool members to teams. Leave blank for unassigned.")
 
+        # Use session state for participants
         if "participants" not in st.session_state:
             st.session_state.participants = {}
 
+        # Upload option
         uploaded = st.file_uploader(
             "Upload assignments (JSON)", type=["json"],
             help='Format: {"New York Yankees": "John", ...}'
@@ -461,11 +464,13 @@ def main():
             except Exception as e:
                 st.error(f"Invalid JSON: {e}")
 
+        # Manual entry via expander
+        # Include both hardcoded teams and any previously discovered API names
         all_known_teams = sorted(set(ALL_TEAMS) | set(SHORT_NAMES.keys()))
         with st.expander("Edit assignments manually"):
             for team in all_known_teams:
                 val = st.text_input(
-                    nickname(team),
+                    SHORT_NAMES.get(team, team),
                     value=st.session_state.participants.get(team, ""),
                     key=f"p_{team}",
                     label_visibility="visible",
@@ -482,22 +487,24 @@ def main():
             "Monte Carlo runs",
             options=[1000, 5000, 10000, 20000, 50000],
             value=10000,
-            help="Higher values produce more precise estimates but take longer"
+            help="More = slower but more precise estimates"
         )
 
-        fetch_btn = st.button("Fetch Scores", type="primary", use_container_width=True)
+        fetch_btn = st.button("🔄 Fetch Scores", type="primary", use_container_width=True)
 
     # --- Main content ---
+    # Check for cached data or trigger fetch
     if fetch_btn or "games" not in st.session_state:
-        start_str = start_date.strftime("%Y-%m-%d")
-        end_str = end_date.strftime("%Y-%m-%d")
+        if fetch_btn or "games" not in st.session_state:
+            start_str = start_date.strftime("%Y-%m-%d")
+            end_str = end_date.strftime("%Y-%m-%d")
 
-        progress_bar = st.progress(0, text="Fetching scores from MLB API...")
-        games = fetch_season_scores(start_str, end_str, progress_bar)
-        progress_bar.empty()
+            progress_bar = st.progress(0, text="Fetching scores from MLB API...")
+            games = fetch_season_scores(start_str, end_str, progress_bar)
+            progress_bar.empty()
 
-        st.session_state.games = games
-        st.session_state.end_date = end_str
+            st.session_state.games = games
+            st.session_state.end_date = end_str
 
     games = st.session_state.get("games", [])
 
@@ -517,11 +524,15 @@ def main():
     avg_gp = sum(t.games_played for t in teams.values()) / len(teams)
     freq = blended_frequencies(observed, int(avg_gp))
 
+<<<<<<< HEAD
     board = get_leaderboard(teams, freq)
 
     end_str = st.session_state.get("end_date", "-")
+=======
+    end_str = st.session_state.get("end_date", "—")
+>>>>>>> parent of c1afaf8 (Update mlb_pool_app.py)
 
-    # Diagnostic: surface any team names from the API not in the hardcoded list
+    # Diagnostic: surface any team names from the API that aren't in our hardcoded list
     api_names = discover_team_names(games)
     unknown_names = api_names - set(ALL_TEAMS)
     if unknown_names:
@@ -530,9 +541,9 @@ def main():
             st.subheader("Team Name Alerts")
             st.warning(
                 f"The MLB API returned team name(s) not in the built-in list: "
-                f"{', '.join(sorted(unknown_names))}. "
-                f"The app tracks these teams automatically, but you may want to update "
-                f"the ALL_TEAMS list and TEAM_NICKNAMES dict in the source code."
+                f"**{', '.join(sorted(unknown_names))}**. "
+                f"These teams are tracked automatically, but you may want to update "
+                f"the ALL_TEAMS list and SHORT_NAMES dict in the source code."
             )
 
     # --- Top metrics ---
@@ -542,6 +553,7 @@ def main():
     completed_teams = sum(1 for t in board if t.completed)
 
     col1, col2, col3, col4 = st.columns(4)
+<<<<<<< HEAD
     col1.metric(
         "Completed Games", f"{total_games:,}",
         help="Total regular-season MLB games with final scores recorded so far"
@@ -564,28 +576,34 @@ def main():
         "Teams Finished", f"{completed_teams}/30",
         help="Number of teams that have scratched off all 14 run totals"
     )
+=======
+    col1.metric("Completed Games", f"{total_games:,}", help="Total final-score MLB games recorded this season")
+    col2.metric("Pool Leader", f"{SHORT_NAMES.get(leader.team_name, leader.team_name)}", help="Team with the most run totals scratched off")
+    col3.metric("Most Scratched Off", f"{most_scratched}/14", help="How many of the 14 run totals (0–13) the leading team has achieved")
+    col4.metric("Teams Finished", f"{completed_teams}/30", help="Teams that have scratched off all 14 run totals")
+>>>>>>> parent of c1afaf8 (Update mlb_pool_app.py)
 
     # Winner banner
     winners = [t for t in board if t.completed]
     if winners:
         w = winners[0]
         st.markdown(
-            f'<div class="winner-banner">WINNER: {w.team_name} '
-            f'({w.participant}), completed on {w.completion_date()} '
-            f'in {w.games_played} of {SEASON_GAMES} games</div>',
+            f'<div class="winner-banner">🏆 WINNER: {w.team_name} '
+            f'({w.participant}) — Completed {w.completion_date()} '
+            f'in {w.games_played} games</div>',
             unsafe_allow_html=True
         )
 
-    st.caption(f"Data through: {end_str}")
+    st.caption(f"Data through: **{end_str}**")
 
     # --- Tabs ---
     tab_board, tab_grid, tab_detail, tab_odds, tab_race, tab_debug = st.tabs([
-        "Leaderboard",
-        "Scratch-Off Grid",
-        "Team Detail",
-        "Run Probabilities",
-        "Race Projections",
-        "Raw Data",
+        "📋 Leaderboard",
+        "🔲 Scratch-Off Grid",
+        "🔍 Team Detail",
+        "📊 Run Probabilities",
+        "🏁 Race Projections",
+        "🛠 Raw Data",
     ])
 
     # ========================== TAB 1: LEADERBOARD ==========================
@@ -599,6 +617,7 @@ def main():
         rows = []
         for rank, team in enumerate(board, 1):
             remaining = team.remaining
+<<<<<<< HEAD
             if team.completed:
                 proj_label = f"Done in {team.games_played}"
             else:
@@ -607,13 +626,20 @@ def main():
                 )
                 proj_total = team.games_played + sim["expected_games"]
                 proj_label = f"~{proj_total:.0f} of {SEASON_GAMES}"
+=======
+>>>>>>> parent of c1afaf8 (Update mlb_pool_app.py)
             rows.append({
                 "Rank": rank,
-                "Team": nickname(team.team_name),
+                "Team": team.team_name,
+                "Abbr": SHORT_NAMES.get(team.team_name, ""),
                 "Owner": team.participant,
                 "Scratched": team.scratched_count,
+<<<<<<< HEAD
                 "Projected Finish": proj_label,
                 "Games Played": f"{team.games_played} of {SEASON_GAMES}",
+=======
+                "Games Played": team.games_played,
+>>>>>>> parent of c1afaf8 (Update mlb_pool_app.py)
                 "Run Totals Still Needed": ", ".join(str(r) for r in remaining) if remaining else "COMPLETE",
                 "Still Need": len(remaining),
             })
@@ -634,9 +660,10 @@ def main():
     # ======================== TAB 2: SCRATCH-OFF GRID ========================
     with tab_grid:
         st.subheader("Scratch-Off Grid")
-        st.caption("Blue = scratched off, yellow = still needed. Hover for details.")
+        st.caption("Green = achieved, dark = still needed")
 
-        grid_teams = [nickname(t.team_name) for t in board]
+        # Build heatmap data
+        grid_teams = [SHORT_NAMES.get(t.team_name, t.team_name) for t in board]
         grid_data = []
         hover_data = []
         for team in board:
@@ -645,10 +672,10 @@ def main():
             for r in TARGET_RUNS:
                 if r in team.achieved:
                     row.append(1)
-                    hover_row.append(f"{team.team_name}<br>Runs: {r}<br>Scratched: {team.achieved[r]}")
+                    hover_row.append(f"{team.team_name}<br>Runs: {r}<br>Date: {team.achieved[r]}")
                 else:
                     row.append(0)
-                    hover_row.append(f"{team.team_name}<br>Runs: {r}<br>Not yet")
+                    hover_row.append(f"{team.team_name}<br>Runs: {r}<br>NOT YET")
             grid_data.append(row)
             hover_data.append(hover_row)
 
@@ -658,18 +685,18 @@ def main():
             y=grid_teams,
             text=hover_data,
             hoverinfo="text",
-            colorscale=[[0, "#fef3c7"], [1, "#2563eb"]],
+            colorscale=[[0, "#1f2937"], [1, "#22c55e"]],
             showscale=False,
-            xgap=3,
-            ygap=3,
+            xgap=2,
+            ygap=2,
         ))
 
         fig_grid.update_layout(
             xaxis_title="Run Total",
             yaxis=dict(autorange="reversed"),
-            height=max(500, len(board) * 24),
+            height=max(500, len(board) * 22),
             margin=dict(l=10, r=10, t=30, b=40),
-            font=dict(size=12),
+            font=dict(size=11),
         )
 
         st.plotly_chart(fig_grid, use_container_width=True)
@@ -679,32 +706,22 @@ def main():
         selected_team_name = st.selectbox(
             "Select a team",
             [t.team_name for t in board],
-            format_func=lambda x: f"{nickname(x)} ({participants.get(x, '-')})"
+            format_func=lambda x: f"{SHORT_NAMES.get(x, x)} — {x} ({participants.get(x, '—')})"
         )
 
         team = teams[selected_team_name]
-        games_left = SEASON_GAMES - team.games_played
 
-        st.subheader(team.team_name)
-        if team.participant != "-":
+        # Progress visualization
+        st.subheader(f"{team.team_name}")
+        if team.participant != "—":
             st.caption(f"Owner: {team.participant}")
 
         col_gp, col_done, col_left = st.columns(3)
-        col_gp.metric(
-            "Games Played", f"{team.games_played} of {SEASON_GAMES}",
-            help=f"This team has {games_left} games remaining in the {SEASON_GAMES}-game season"
-        )
-        col_done.metric(
-            "Run Totals Scratched Off", f"{team.scratched_count}/14",
-            help="Out of 14 possible (0 through 13)"
-        )
-        col_left.metric(
-            "Run Totals Still Needed", len(team.remaining),
-            help="How many of the 14 run totals this team has not yet scored"
-        )
+        col_gp.metric("Games Played", team.games_played)
+        col_done.metric("Run Totals Scratched Off", f"{team.scratched_count}/14", help="Out of 14 possible (0 through 13)")
+        col_left.metric("Run Totals Still Needed", len(team.remaining), help="How many of the 14 run totals this team hasn't scored yet")
 
         # Visual scratch card
-        st.caption("Blue = scratched off, yellow = still needed")
         cols = st.columns(14)
         for i, r in enumerate(TARGET_RUNS):
             with cols[i]:
@@ -713,14 +730,14 @@ def main():
                     st.caption(team.achieved[r][5:])  # show MM-DD
                 else:
                     st.markdown(f'<div class="needed">{r}</div>', unsafe_allow_html=True)
-                    st.caption("-")
+                    st.caption("—")
 
         # Achievement timeline
         if team.achieved:
             st.subheader("Achievement Timeline")
             timeline_data = sorted(team.achieved.items(), key=lambda x: x[1])
             timeline_df = pd.DataFrame(
-                [{"Run Total": r, "Date": d} for r, d in timeline_data]
+                [{"Run Total": r, "Date": d, "Game #": "—"} for r, d in timeline_data]
             )
             st.dataframe(timeline_df, use_container_width=True, hide_index=True)
 
@@ -736,7 +753,7 @@ def main():
             fig_hist = px.bar(
                 hist_df, x="Runs", y="Games",
                 color_discrete_sequence=["#3b82f6"],
-                title=f"How often the {nickname(team.team_name)} score N runs"
+                title=f"How often {SHORT_NAMES.get(team.team_name, team.team_name)} scores N runs"
             )
             fig_hist.update_layout(
                 xaxis=dict(dtick=1),
@@ -748,42 +765,28 @@ def main():
         # Monte Carlo projection
         if team.remaining and team.games_played > 0:
             st.subheader("Projection")
-            with st.spinner("Running simulation..."):
+            with st.spinner("Running Monte Carlo simulation..."):
                 sim = monte_carlo_expected_games(
                     team.remaining, freq,
                     games_played=team.games_played,
                     n_simulations=sim_count
                 )
 
+            games_left = 162 - team.games_played
             pcol1, pcol2, pcol3 = st.columns(3)
-            pcol1.metric(
-                "Est. Games to Complete",
-                f"~{sim['expected_games']:.0f} of {SEASON_GAMES}",
-                help=(
-                    f"The simulation estimates this team needs about {sim['expected_games']:.0f} total games "
-                    f"to scratch off all remaining run totals. Each team plays {SEASON_GAMES} games per season."
-                )
-            )
-            pcol2.metric(
-                "Median Games to Complete",
-                f"{sim['median_games']:.0f} of {SEASON_GAMES}",
-                help="Half of simulated seasons finished faster than this, half finished slower"
-            )
+            pcol1.metric("Est. Games to Complete", f"~{sim['expected_games']:.0f}", help="Average number of games needed to scratch off all remaining run totals, based on simulation")
+            pcol2.metric("Median Games to Complete", f"{sim['median_games']:.0f}", help="Half of simulated seasons finished faster than this, half slower")
             pcol3.metric(
-                f"Chance of Finishing ({games_left} of {SEASON_GAMES} games left)",
+                f"Chance of Finishing ({games_left} games left)",
                 f"{sim['completion_prob_season']*100:.1f}%",
-                help=(
-                    f"In the simulation, this is the percentage of seasons where the team "
-                    f"scratched off all remaining run totals within the {games_left} games left"
-                )
+                help="Probability this team scratches off all remaining run totals before their 162-game season ends"
             )
 
             hardest = max(team.remaining, key=lambda r: 1.0 / freq.get(r, 0.001))
             hardest_p = freq.get(hardest, 0.001)
             st.info(
-                f"Hardest remaining: {hardest} runs. "
-                f"Teams score exactly {hardest} runs in about {hardest_p*100:.1f}% of games, "
-                f"or roughly once every {1/hardest_p:.0f} games."
+                f"Hardest remaining: **{hardest} runs** — happens ~{hardest_p*100:.1f}% "
+                f"of games (~1 in {1/hardest_p:.0f})"
             )
 
     # ====================== TAB 4: RUN PROBABILITIES ======================
@@ -799,8 +802,8 @@ def main():
             one_in = 1 / blend if blend > 0 else float("inf")
             prob_rows.append({
                 "Runs Scored": r,
-                "Historical Avg (2014-24)": f"{hist:.1%}",
-                "This Season": f"{obs:.1%}" if avg_gp > 0 else "-",
+                "Historical Avg (2014–24)": f"{hist:.1%}",
+                "This Season": f"{obs:.1%}" if avg_gp > 0 else "—",
                 "Blended Estimate": f"{blend:.1%}",
                 "Avg. Games Between Occurrences": f"{one_in:.1f}",
             })
@@ -833,33 +836,28 @@ def main():
         st.plotly_chart(fig_prob, use_container_width=True)
 
         # Insight callouts
-        p13 = freq.get(13, 0.006)
-        p0 = freq.get(0, 0.07)
-        p_sweet = (freq.get(3, 0) + freq.get(4, 0) + freq.get(5, 0)) * 100
-        p_tail = sum(freq.get(r, 0) for r in range(10, 14)) * 100
-        st.markdown(
-            f"Teams score exactly 13 runs roughly once every {1/p13:.0f} games "
-            f"({p13*100:.1f}% per game), which makes it the bottleneck for most pool entries. "
-            f"Getting shut out (0 runs) is also relatively uncommon at about once every "
-            f"{1/p0:.0f} games. The sweet spot of 3 to 5 runs accounts for about "
-            f"{p_sweet:.0f}% of all games. Scoring 10 or more runs is rare; those totals "
-            f"combine for only about {p_tail:.1f}% of games."
-        )
+        st.markdown(f"""
+**Key insights:**
+- Scoring exactly **13 runs** happens roughly once every **{1/freq.get(13, 0.006):.0f}** games (~{freq.get(13,0.006)*100:.1f}% per game). This is the bottleneck for most teams.
+- Getting **shut out (0 runs)** is also relatively rare at ~1 in {1/freq.get(0, 0.07):.0f} games.
+- The sweet spot (3–5 runs) accounts for ~{(freq.get(3,0)+freq.get(4,0)+freq.get(5,0))*100:.0f}% of all games.
+- Runs 10+ are the "long tail" — combined they happen only ~{sum(freq.get(r,0) for r in range(10,14))*100:.1f}% of the time.
+        """)
 
     # ====================== TAB 5: RACE PROJECTIONS ======================
     with tab_race:
-        st.subheader("Race to Finish: Projected Completion")
+        st.subheader("Race to Finish — Projected Completion")
 
         with st.spinner("Running simulations for all 30 teams..."):
             race_rows = []
             for team in board:
-                games_left = SEASON_GAMES - team.games_played
                 if team.completed:
                     race_rows.append({
-                        "Team": nickname(team.team_name),
+                        "Team": team.team_name,
+                        "Abbr": SHORT_NAMES.get(team.team_name, ""),
                         "Owner": team.participant,
                         "Scratched": team.scratched_count,
-                        "Games Played": f"{team.games_played} of {SEASON_GAMES}",
+                        "Games Played": team.games_played,
                         "Est. Games to Complete": 0,
                         "Chance of Finishing by Season End": 100.0,
                         "Status": f"DONE ({team.completion_date()})",
@@ -871,10 +869,11 @@ def main():
                         n_simulations=sim_count
                     )
                     race_rows.append({
-                        "Team": nickname(team.team_name),
+                        "Team": team.team_name,
+                        "Abbr": SHORT_NAMES.get(team.team_name, ""),
                         "Owner": team.participant,
                         "Scratched": team.scratched_count,
-                        "Games Played": f"{team.games_played} of {SEASON_GAMES}",
+                        "Games Played": team.games_played,
                         "Est. Games to Complete": round(sim["expected_games"]),
                         "Chance of Finishing by Season End": round(sim["completion_prob_season"] * 100, 1),
                         "Status": f"Need {len(team.remaining)} more",
@@ -885,10 +884,10 @@ def main():
             race_df = race_df.sort_values("Est. Games to Complete")
 
             st.caption(
-                "Est. Games to Complete: the average number of games the simulation "
-                "needed to scratch off all remaining run totals. "
-                "Chance of Finishing by Season End: the percentage of simulated seasons "
-                f"where the team completed the pool within the {SEASON_GAMES}-game season."
+                "**Est. Games to Complete**: average number of games needed to scratch off all "
+                "remaining run totals (based on simulation). "
+                "**Chance of Finishing by Season End**: probability of completing the pool "
+                "before the team's 162-game season is over."
             )
 
             st.dataframe(
@@ -908,60 +907,58 @@ def main():
             # Chart: expected games remaining
             fig_race = px.bar(
                 race_df.sort_values("Est. Games to Complete"),
-                x="Team", y="Est. Games to Complete",
+                x="Abbr", y="Est. Games to Complete",
                 color="Chance of Finishing by Season End",
                 color_continuous_scale="RdYlGn",
-                title=f"Estimated Games to Complete Pool (out of {SEASON_GAMES})",
+                title="Estimated Games Remaining to Complete Pool",
                 range_color=[0, 100],
             )
             fig_race.update_layout(
                 xaxis_title="Team",
-                yaxis_title=f"Est. Games to Complete (of {SEASON_GAMES})",
+                yaxis_title="Est. Games to Complete",
                 height=400,
                 margin=dict(t=40),
-            )
-            # Add a reference line at 162
-            fig_race.add_hline(
-                y=SEASON_GAMES, line_dash="dot", line_color="#ef4444",
-                annotation_text=f"{SEASON_GAMES}-game season",
-                annotation_position="top right",
             )
             st.plotly_chart(fig_race, use_container_width=True)
 
     # ======================== TAB 6: RAW DATA / DEBUG ========================
     with tab_debug:
-        st.subheader("Raw Data and Diagnostics")
+        st.subheader("Raw Data & Diagnostics")
         st.caption(
-            "Use this tab to verify the data the app uses. "
-            "If a team or game appears to be missing, check here first."
+            "Use this tab to verify the data the app is working with. "
+            "If a team or game is missing, check here first."
         )
 
+        # Team names the API returned
         api_names = discover_team_names(games)
-        st.markdown("Team names from the API (the exact strings the MLB API returned):")
+        st.markdown("**Team names from API** (these are the exact strings the MLB API returned):")
         api_names_sorted = sorted(api_names)
         name_rows = []
         for name in api_names_sorted:
-            in_hardcoded = "Yes" if name in ALL_TEAMS else "NO, not in built-in list"
+            in_hardcoded = "Yes" if name in ALL_TEAMS else "NO — not in built-in list"
+            abbr = SHORT_NAMES.get(name, "auto-generated")
             gp = teams[name].games_played if name in teams else 0
             name_rows.append({
                 "API Team Name": name,
-                "Nickname": nickname(name),
+                "Abbreviation": abbr,
                 "In Built-in List?": in_hardcoded,
                 "Games Played": gp,
             })
         st.dataframe(pd.DataFrame(name_rows), use_container_width=True, hide_index=True)
 
+        # Any hardcoded names with 0 games (potential mismatch)
         zero_game_teams = [t.team_name for t in teams.values() if t.games_played == 0]
         if zero_game_teams:
             st.warning(
-                f"Teams with 0 games: {', '.join(sorted(zero_game_teams))}. "
-                f"If the season has started, the API may use a different name for these teams "
-                f"than what the built-in list expects."
+                f"**Teams with 0 games**: {', '.join(sorted(zero_game_teams))}. "
+                f"If the season has started, these teams may have a name mismatch — "
+                f"the API might be using a different name than what's in the built-in list."
             )
 
         st.divider()
 
-        st.markdown("All fetched games (most recent first):")
+        # Raw game log
+        st.markdown("**All fetched games** (most recent first):")
         game_log_rows = []
         for g in sorted(games, key=lambda x: x["date"], reverse=True):
             game_log_rows.append({
@@ -982,6 +979,7 @@ def main():
 
         st.caption(f"Total games loaded: {len(games)}")
 
+        # Search for a specific team
         st.divider()
         search_team = st.text_input("Search for a team name in raw data", placeholder="e.g. Brewers")
         if search_team:
@@ -1005,17 +1003,16 @@ def main():
             else:
                 st.error(
                     f"No games found matching '{search_team}'. "
-                    f"The API may use a different team name. "
+                    f"The API may be using a different team name. "
                     f"Check the team name list above."
                 )
 
     # --- Footer ---
     st.divider()
     st.caption(
-        "The MLB Stats API (statsapi.mlb.com) provides all game data. "
-        "The app blends historical run frequencies (2014 to 2024) with observed "
-        "season data to estimate probabilities, then runs Monte Carlo simulations "
-        "to project each team's chances of completing the pool."
+        "Data sourced from the MLB Stats API (statsapi.mlb.com). "
+        "Probabilities use a Bayesian blend of historical frequencies (2014–2024) "
+        "and observed season data. Projections via Monte Carlo simulation."
     )
 
 
