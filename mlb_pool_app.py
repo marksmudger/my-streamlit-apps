@@ -104,6 +104,16 @@ def nickname(full_name: str) -> str:
 # ---------------------------------------------------------------------------
 
 class TeamProgress:
+    """Tracks a single MLB team's progress through the 13-run pool.
+
+    Attributes:
+        team_name: Full team name as returned by the MLB Stats API.
+        participant: Pool member assigned to this team ("-" if unassigned).
+        games_played: Total regular-season games recorded for this team.
+        achieved: Dict mapping run total -> date first scored (e.g. {4: "2026-04-01"}).
+        run_histogram: Count of games in which the team scored each run total.
+    """
+
     def __init__(self, team_name: str, participant: str = "-"):
         self.team_name = team_name
         self.participant = participant
@@ -146,14 +156,23 @@ class TeamProgress:
 # ---------------------------------------------------------------------------
 
 def _request_with_retry(url, params=None):
+    """GET with retry logic. Returns the Response or None on failure.
+
+    Stores the last exception message in st.session_state['last_api_error']
+    so callers can surface it in the UI rather than failing silently.
+    """
+    last_error = None
     for attempt in range(1, RETRY_ATTEMPTS + 1):
         try:
             resp = requests.get(url, params=params, timeout=REQUEST_TIMEOUT)
             resp.raise_for_status()
+            st.session_state.pop("last_api_error", None)
             return resp
-        except requests.RequestException:
+        except requests.RequestException as exc:
+            last_error = str(exc)
             if attempt < RETRY_ATTEMPTS:
                 time.sleep(RETRY_DELAY)
+    st.session_state["last_api_error"] = last_error
     return None
 
 
@@ -298,17 +317,41 @@ def compute_observed_frequencies(teams):
 
 
 def blended_frequencies(observed, total_team_games, blend_games=50):
+    """Blend observed run frequencies with historical priors.
+
+    Returns a probability dict for runs 0-24. Values for runs 0-13 blend
+    historical and observed data; values for runs 14+ are drawn from observed
+    data only (they don't affect pool scoring but keep Monte Carlo realistic).
+    """
     if total_team_games == 0:
-        return HISTORICAL_RUN_FREQ.copy()
+        return {r: HISTORICAL_RUN_FREQ.get(r, 0.001) for r in range(0, 25)}
     obs_weight = total_team_games / (total_team_games + blend_games)
     hist_weight = 1.0 - obs_weight
-    return {
-        r: obs_weight * observed.get(r, 0.0) + hist_weight * HISTORICAL_RUN_FREQ.get(r, 0.001)
-        for r in TARGET_RUNS
-    }
+    freq = {}
+    for r in range(0, 25):
+        if r in TARGET_RUNS:
+            freq[r] = obs_weight * observed.get(r, 0.0) + hist_weight * HISTORICAL_RUN_FREQ.get(r, 0.001)
+        else:
+            # Runs 14+ don't affect pool scoring; use observed rate or a small default
+            freq[r] = observed.get(r, 0.001)
+    return freq
 
 
-def monte_carlo_expected_games(remaining, freq, games_played=0, n_simulations=MC_SIMULATIONS):
+@st.cache_data(show_spinner=False)
+def monte_carlo_expected_games(remaining, freq_items, games_played=0, n_simulations=MC_SIMULATIONS):
+    """Estimate games needed to scratch off all run totals in `remaining`.
+
+    Args:
+        remaining: Tuple of run totals still needed (e.g. (0, 7, 13)).
+        freq_items: Tuple of (run_total, probability) pairs (hashable for caching).
+        games_played: Games the team has already played this season.
+        n_simulations: Number of Monte Carlo trials to run.
+
+    Returns:
+        Dict with expected_games, median_games, p25, p75, p90,
+        completion_prob_30, and completion_prob_season.
+    """
+    freq = dict(freq_items)
     if not remaining:
         return {
             "expected_games": 0, "median_games": 0,
@@ -459,6 +502,10 @@ def main():
         fetch_btn = st.button("Fetch Scores", type="primary", use_container_width=True)
 
     # --- Main content ---
+    if start_date > end_date:
+        st.error("Season start date must be on or before the through date. Adjust the dates in the sidebar.")
+        return
+
     if fetch_btn or "games" not in st.session_state:
         start_str = start_date.strftime("%Y-%m-%d")
         end_str = end_date.strftime("%Y-%m-%d")
@@ -473,10 +520,14 @@ def main():
     games = st.session_state.get("games", [])
 
     if not games:
-        st.warning(
-            "No completed games found. The season may not have started yet, "
-            "or there may be a connectivity issue with the MLB API."
-        )
+        api_err = st.session_state.get("last_api_error")
+        if api_err:
+            st.error(f"MLB API request failed: {api_err}")
+        else:
+            st.warning(
+                "No completed games found. The season may not have started yet, "
+                "or there may be a connectivity issue with the MLB API."
+            )
         st.info("The 2026 MLB season begins March 26, 2026.")
         return
 
@@ -704,7 +755,7 @@ def main():
             st.subheader("Projection")
             with st.spinner("Running simulation..."):
                 sim = monte_carlo_expected_games(
-                    team.remaining, freq,
+                    tuple(team.remaining), tuple(sorted(freq.items())),
                     games_played=team.games_played,
                     n_simulations=sim_count
                 )
@@ -820,7 +871,7 @@ def main():
                     })
                 elif team.games_played > 0:
                     sim = monte_carlo_expected_games(
-                        team.remaining, freq,
+                        tuple(team.remaining), tuple(sorted(freq.items())),
                         games_played=team.games_played,
                         n_simulations=sim_count
                     )
