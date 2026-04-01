@@ -43,7 +43,7 @@ ALL_TEAMS = [
     "Detroit Tigers", "Houston Astros", "Kansas City Royals",
     "Los Angeles Angels", "Los Angeles Dodgers", "Miami Marlins",
     "Milwaukee Brewers", "Minnesota Twins", "New York Mets",
-    "New York Yankees", "Oakland Athletics", "Philadelphia Phillies",
+    "New York Yankees", "Athletics", "Philadelphia Phillies",
     "Pittsburgh Pirates", "San Diego Padres", "San Francisco Giants",
     "Seattle Mariners", "St. Louis Cardinals", "Tampa Bay Rays",
     "Texas Rangers", "Toronto Blue Jays", "Washington Nationals",
@@ -60,7 +60,7 @@ SHORT_NAMES = {
     "Los Angeles Angels": "LAA", "Los Angeles Dodgers": "LAD",
     "Miami Marlins": "MIA", "Milwaukee Brewers": "MIL",
     "Minnesota Twins": "MIN", "New York Mets": "NYM",
-    "New York Yankees": "NYY", "Oakland Athletics": "OAK",
+    "New York Yankees": "NYY", "Athletics": "ATH",
     "Philadelphia Phillies": "PHI", "Pittsburgh Pirates": "PIT",
     "San Diego Padres": "SD", "San Francisco Giants": "SF",
     "Seattle Mariners": "SEA", "St. Louis Cardinals": "STL",
@@ -79,7 +79,7 @@ TEAM_NICKNAMES = {
     "Los Angeles Angels": "Angels", "Los Angeles Dodgers": "Dodgers",
     "Miami Marlins": "Marlins", "Milwaukee Brewers": "Brewers",
     "Minnesota Twins": "Twins", "New York Mets": "Mets",
-    "New York Yankees": "Yankees", "Oakland Athletics": "Athletics",
+    "New York Yankees": "Yankees", "Athletics": "Athletics",
     "Philadelphia Phillies": "Phillies", "Pittsburgh Pirates": "Pirates",
     "San Diego Padres": "Padres", "San Francisco Giants": "Giants",
     "Seattle Mariners": "Mariners", "St. Louis Cardinals": "Cardinals",
@@ -935,36 +935,11 @@ def main():
 
     # ======================== TAB 6: RAW DATA / DEBUG ========================
     with tab_debug:
-        st.subheader("Raw Data and Diagnostics")
+        st.subheader("Raw Data")
         st.caption(
             "Use this tab to verify the data the app uses. "
             "If a team or game appears to be missing, check here first."
         )
-
-        api_names = discover_team_names(games)
-        st.markdown("Team names from the API (the exact strings the MLB API returned):")
-        api_names_sorted = sorted(api_names)
-        name_rows = []
-        for name in api_names_sorted:
-            in_hardcoded = "Yes" if name in ALL_TEAMS else "NO, not in built-in list"
-            gp = teams[name].games_played if name in teams else 0
-            name_rows.append({
-                "API Team Name": name,
-                "Nickname": nickname(name),
-                "In Built-in List?": in_hardcoded,
-                "Games Played": gp,
-            })
-        st.dataframe(pd.DataFrame(name_rows), use_container_width=True, hide_index=True)
-
-        zero_game_teams = [t.team_name for t in teams.values() if t.games_played == 0]
-        if zero_game_teams:
-            st.warning(
-                f"Teams with 0 games: {', '.join(sorted(zero_game_teams))}. "
-                f"If the season has started, the API may use a different name for these teams "
-                f"than what the built-in list expects."
-            )
-
-        st.divider()
 
         st.markdown("All fetched games (most recent first):")
         game_log_rows = []
